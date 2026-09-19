@@ -1,0 +1,21 @@
+subarch: amd64
+version_stamp: @VERSION_STAMP@
+target: livecd-stage2
+rel_type: datum
+profile: default/linux/amd64/23.0/desktop/systemd
+snapshot: @SNAPSHOT_NAME@
+source_subpath: datum/livecd-stage1-amd64-@VERSION_STAMP@
+portage_confdir: @PROJECT_ROOT@/config
+livecd/fstype: squashfs
+livecd/fsops: -comp zstd
+livecd/iso: @ISO_PATH@
+livecd/root_overlay: @ROOT_OVERLAY@
+livecd/fsscript: @PROJECT_ROOT@/catalyst/livecd-fsscript.sh
+livecd/type: generic-livecd
+livecd/users: emergence
+livecd/volid: DATUM_EMERGENCE_AMD64
+livecd/motd: @PROJECT_ROOT@/catalyst/motd
+livecd/depclean: no
+boot/kernel: gentoo
+boot/kernel/gentoo/sources: sys-kernel/gentoo-kernel
+boot/kernel/gentoo/use: dist-kernel

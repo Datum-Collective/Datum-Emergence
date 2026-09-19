@@ -1,0 +1,13 @@
+name: source-validation
+on: [push, pull_request]
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate project structure and shell
+        run: ./tests/validate.sh
+
+# Native Catalyst ISO builds require a privileged Gentoo builder with loop
+# mounts and substantial compile time. Run ./build.sh all on a self-hosted,
+# reviewed Gentoo runner; do not pretend an Ubuntu hosted runner can do this.

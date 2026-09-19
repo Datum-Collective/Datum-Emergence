@@ -1,0 +1,8 @@
+name: release
+on:
+  workflow_dispatch:
+jobs:
+  notice:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'Release uploads are enabled after a native Catalyst build is proven on a self-hosted Gentoo runner.'

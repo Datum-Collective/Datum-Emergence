@@ -1,0 +1,16 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+fail() { printf '%s\n' "configure: $*" >&2; exit 1; }
+for f in packages/emergence config/make.conf catalyst/catalyst.conf catalyst/specs/emergence-amd64.stage1.spec catalyst/specs/emergence-amd64.spec; do test -f "$root/$f" || fail "missing $f"; done
+for d in config/package.use config/package.accept_keywords config/package.mask config/package.unmask config/repos.conf etc/skel overlay; do test -d "$root/$d" || fail "missing $d"; done
+secret_pattern='BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_|AKIA[0-9A-Z]{16}|password[[:space:]]*=[[:space:]]*[^#[:space:]]+'
+machine_pattern='/home/(dan|[^$])|hades|eDP-1|nvidia'
+if command -v rg >/dev/null 2>&1; then
+  if rg -n --hidden -i "$secret_pattern" "$root" --glob '!.git/**' --glob '!README.md' --glob '!scripts/configure.sh'; then fail "possible secret found"; fi
+  if rg -n "$machine_pattern" "$root/etc" "$root/overlay" "$root/config"; then fail "machine-specific reference leaked"; fi
+else
+  if grep -RInE --exclude-dir=.git --exclude=README.md --exclude=configure.sh "$secret_pattern" "$root"; then fail "possible secret found"; fi
+  if grep -RInE "$machine_pattern" "$root/etc" "$root/overlay" "$root/config"; then fail "machine-specific reference leaked"; fi
+fi
+printf '%s\n' 'Configuration is structurally valid and contains no detected reference-machine paths or common secrets.'
