@@ -5,7 +5,6 @@
 sys-apps/systemd
 sys-apps/dbus
 sys-apps/pciutils
-sys-kernel/gentoo-kernel-bin
 sys-kernel/linux-firmware
 sys-boot/grub
 
