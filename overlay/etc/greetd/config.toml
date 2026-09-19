@@ -1,0 +1,6 @@
+[terminal]
+vt = 1
+
+[default_session]
+command = "tuigreet --greeting 'Datum Emergence' --cmd 'dbus-run-session Hyprland'"
+user = "emergence"

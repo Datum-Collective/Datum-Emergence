@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+runtime=${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}
+pidfile="$runtime/datum-wf-recorder.pid"
+if [ -r "$pidfile" ] && kill -0 "$(cat "$pidfile")" 2>/dev/null; then
+  kill "$(cat "$pidfile")"
+  rm -f "$pidfile"
+  notify-send 'Datum Emergence' 'Screen recording stopped'
+  exit 0
+fi
+mkdir -p "$HOME/Videos"
+wf-recorder -f "$HOME/Videos/recording-$(date +%Y%m%d-%H%M%S).mp4" &
+echo $! > "$pidfile"
+notify-send 'Datum Emergence' 'Screen recording started'

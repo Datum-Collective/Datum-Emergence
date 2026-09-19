@@ -1,0 +1,20 @@
+[global]
+width = 350
+height = (0, 300)
+origin = top-right
+offset = (20, 20)
+frame_width = 2
+corner_radius = 4
+gap_size = 8
+font = JetBrainsMono Nerd Font 11
+markup = yes
+format = "<b>%s</b>\\n%b"
+background = "#1e1e1e"
+foreground = "#d4d4d4"
+frame_color = "#555555"
+timeout = 5
+[urgency_critical]
+background = "#5f0000"
+foreground = "#ffffff"
+frame_color = "#ff4444"
+timeout = 0
