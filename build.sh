@@ -15,24 +15,29 @@ configure() { "$root/scripts/configure.sh"; }
 
 prepare_inputs() {
   : "${EMERGENCE_STAGE3:?set EMERGENCE_STAGE3 to a verified stage3 tarball}"
+  : "${EMERGENCE_STAGE3_SHA512:?set EMERGENCE_STAGE3_SHA512 to the verified SHA512 of EMERGENCE_STAGE3}"
   : "${EMERGENCE_PORTAGE_TREE:?set EMERGENCE_PORTAGE_TREE to a pinned Gentoo git checkout}"
   test -f "$EMERGENCE_STAGE3" || die "stage3 not found: $EMERGENCE_STAGE3"
   test -d "$EMERGENCE_PORTAGE_TREE/.git" || die "not a Git checkout: $EMERGENCE_PORTAGE_TREE"
   need git
+  need sha512sum
+  actual_stage3_sha512=$(sha512sum "$EMERGENCE_STAGE3" | awk '{print $1}')
+  test "$actual_stage3_sha512" = "$EMERGENCE_STAGE3_SHA512" || die "stage3 SHA512 does not match EMERGENCE_STAGE3_SHA512"
+  test -z "$(git -C "$EMERGENCE_PORTAGE_TREE" status --porcelain)" || die "Portage checkout has uncommitted changes"
   snapshot_name=$(git -C "$EMERGENCE_PORTAGE_TREE" rev-parse HEAD)
   stage3_name=$(basename "$EMERGENCE_STAGE3")
   packages=$(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$root/packages/emergence" | tr '\n' ' ')
-  mkdir -p "$work/catalyst/builds/datum" "$work/repos" "$work/generated" "$work/root-overlay"
+  mkdir -p "$work/catalyst/builds/datum" "$work/catalyst/repos" "$work/generated" "$work/root-overlay"
   cp -f -- "$EMERGENCE_STAGE3" "$work/catalyst/builds/datum/$stage3_name"
-  rm -rf "$work/repos/gentoo.git"
-  git clone --bare --no-local "$EMERGENCE_PORTAGE_TREE" "$work/repos/gentoo.git"
+  rm -rf "$work/catalyst/repos/gentoo.git"
+  git clone --bare --no-local "$EMERGENCE_PORTAGE_TREE" "$work/catalyst/repos/gentoo.git"
   rm -rf "$work/root-overlay"
   cp -a "$root/overlay" "$work/root-overlay"
   mkdir -p "$work/root-overlay/etc/skel" "$work/root-overlay/usr/share/backgrounds/datum-emergence"
   cp -a "$root/etc/skel/." "$work/root-overlay/etc/skel/"
   cp -a "$root/branding/wallpaper.svg" "$work/root-overlay/usr/share/backgrounds/datum-emergence/"
   chmod 0755 "$work/root-overlay/usr/local/bin/"datum-*
-  export snapshot_name stage3_name packages
+  export snapshot_name stage3_name packages actual_stage3_sha512
 }
 
 render() {
@@ -51,11 +56,18 @@ prepare_catalyst() {
   catalyst -c "$work/generated/catalyst.conf" --snapshot "$snapshot_name"
 }
 
-stage() { configure; prepare_catalyst; catalyst -c "$work/generated/catalyst.conf" -f "$work/generated/stage1.spec"; }
+stage_artifact() {
+  find "$work/catalyst/builds/datum" -maxdepth 1 -type f \
+    -name "livecd-stage1-amd64-$version_stamp.tar.*" ! -name '*.DIGESTS' ! -name '*.CONTENTS*' -print -quit
+}
+
+run_stage() { catalyst -c "$work/generated/catalyst.conf" -f "$work/generated/stage1.spec"; }
+
+stage() { configure; prepare_catalyst; run_stage; }
 
 iso() {
   configure; prepare_catalyst
-  test -f "$work/catalyst/builds/datum/livecd-stage1-amd64-$version_stamp.tar.xz" || stage
+  test -n "$(stage_artifact)" || run_stage
   mkdir -p "$dist"
   catalyst -c "$work/generated/catalyst.conf" -f "$work/generated/stage2.spec"
   validate_iso
@@ -70,7 +82,7 @@ validate_iso() {
 
 build_info() {
   { printf 'project_commit=%s\n' "$(git -C "$root" rev-parse HEAD 2>/dev/null || printf uncommitted)"
-    printf 'stage3=%s\nportage_snapshot=%s\ncatalyst=%s\narchitecture=amd64\nprofile=%s\n' "$stage3_name" "$snapshot_name" "$(catalyst -V)" 'default/linux/amd64/23.0/desktop/systemd'
+    printf 'stage3=%s\nstage3_sha512=%s\nportage_snapshot=%s\ncatalyst=%s\narchitecture=amd64\nprofile=%s\n' "$stage3_name" "$actual_stage3_sha512" "$snapshot_name" "$(catalyst -V)" 'default/linux/amd64/23.0/desktop/systemd'
     sha256sum "$root/packages/emergence" | sed 's/^/package_manifest_sha256=/'
   } > "$dist/emergence-build-info.txt"
 }
@@ -88,7 +100,7 @@ case ${1:-help} in
   stage) stage ;;
   iso) iso ;;
   test) test_iso ;;
-  all) stage; iso ;;
+  all) configure; prepare_catalyst; run_stage; mkdir -p "$dist"; catalyst -c "$work/generated/catalyst.conf" -f "$work/generated/stage2.spec"; validate_iso; build_info ;;
   clean) clean "${2:-}" ;;
   *) printf '%s\n' 'usage: ./build.sh {audit|configure|stage|iso|test|all|clean --yes}' >&2; exit 2 ;;
 esac

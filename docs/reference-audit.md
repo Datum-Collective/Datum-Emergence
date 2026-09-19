@@ -19,3 +19,6 @@ was designed against Gentoo Catalyst 4.1.1 source and templates.
 The original rice repository was used only as a configuration reference.
 Emergence contains rewritten generic configuration and original SVG branding;
 it does not import its PNG wallpaper, user account state, or home directory.
+
+Catalyst, rather than an rsync configuration copied from the reference host,
+supplies the immutable Portage snapshot during an Emergence build.

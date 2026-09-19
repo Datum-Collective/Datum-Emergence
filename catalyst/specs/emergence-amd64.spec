@@ -15,7 +15,6 @@ livecd/type: generic-livecd
 livecd/users: emergence
 livecd/volid: DATUM_EMERGENCE_AMD64
 livecd/motd: @PROJECT_ROOT@/catalyst/motd
-livecd/depclean: no
 boot/kernel: gentoo
 boot/kernel/gentoo/sources: sys-kernel/gentoo-kernel
 boot/kernel/gentoo/use: dist-kernel

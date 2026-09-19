@@ -58,6 +58,7 @@ the *builder* if necessary; do not change a target system merely to build it.
 
 ```sh
 export EMERGENCE_STAGE3=/srv/emergence-inputs/stage3-amd64-YYYYMMDD.tar.xz
+export EMERGENCE_STAGE3_SHA512="<verified SHA512 digest>"
 export EMERGENCE_PORTAGE_TREE=/srv/emergence-inputs/gentoo
 sudo -E ./build.sh all
 ```
@@ -74,6 +75,9 @@ PipeWire/WirePlumber, NetworkManager, Thunar/Yazi, portals, greetd/tuigreet,
 and a small set of screenshot/audio tools. Generic configuration is installed
 from `/etc/skel`; no current username, display output, wallpaper path, SSH key,
 browser profile, cache, account token, or machine ID is copied.
+The live ISO intentionally auto-starts the ephemeral `emergence` desktop
+session through greetd. Its password is locked; it is not an installed-user
+model and is replaced by an eventual installer.
 
 Edit `packages/emergence`, `config/`, and `etc/skel/` intentionally. Hardware
 or personal changes should live in a separate profile or user configuration.

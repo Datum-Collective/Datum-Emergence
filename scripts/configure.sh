@@ -4,6 +4,11 @@ root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 fail() { printf '%s\n' "configure: $*" >&2; exit 1; }
 for f in packages/emergence config/make.conf catalyst/catalyst.conf catalyst/specs/emergence-amd64.stage1.spec catalyst/specs/emergence-amd64.spec; do test -f "$root/$f" || fail "missing $f"; done
 for d in config/package.use config/package.accept_keywords config/package.mask config/package.unmask config/repos.conf etc/skel overlay; do test -d "$root/$d" || fail "missing $d"; done
+command -v python3 >/dev/null 2>&1 || fail "python3 is required for configuration validation"
+python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$root/etc/skel/.config/waybar/config" || fail "invalid Waybar JSON"
+python3 -c 'import tomllib, sys; tomllib.load(open(sys.argv[1], "rb"))' "$root/catalyst/catalyst.conf" || fail "invalid Catalyst TOML"
+python3 -c 'import tomllib, sys; tomllib.load(open(sys.argv[1], "rb"))' "$root/overlay/etc/greetd/config.toml" || fail "invalid greetd TOML"
+if ! awk '/^[[:space:]]*($|#)/ { next } !/^[a-z0-9+_.-]+\/[a-z0-9+_.-]+(:[a-z0-9+_.-]+)?$/ { exit 1 }' "$root/packages/emergence"; then fail "package manifest contains an invalid atom"; fi
 secret_pattern='BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY|ghp_[A-Za-z0-9]{20,}|github_pat_|AKIA[0-9A-Z]{16}|password[[:space:]]*=[[:space:]]*[^#[:space:]]+'
 machine_pattern='/home/(dan|[^$])|hades|eDP-1|nvidia'
 if command -v rg >/dev/null 2>&1; then
