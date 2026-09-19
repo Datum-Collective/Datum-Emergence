@@ -1,0 +1,63 @@
+# Datum Emergence package manifest. One Portage atom per line.
+# It is intentionally not the reference machine's complete @world.
+
+# A. Base OS and boot
+sys-apps/systemd
+sys-apps/dbus
+sys-apps/pciutils
+sys-kernel/gentoo-kernel-bin
+sys-kernel/linux-firmware
+sys-boot/grub
+
+# B. Desktop
+gui-wm/hyprland
+gui-apps/waybar
+gui-apps/wofi
+x11-terms/kitty
+x11-misc/dunst
+gui-apps/hyprpaper
+xfce-base/thunar
+app-misc/yazi
+gnome-extra/polkit-gnome
+
+# C. Networking
+net-misc/networkmanager
+net-wireless/wpa_supplicant
+net-wireless/iw
+
+# D. Audio
+media-video/pipewire
+media-video/wireplumber
+media-libs/libpulse
+media-sound/alsa-utils
+media-sound/pavucontrol
+
+# E. Graphics, portals, fonts, and session
+x11-base/xwayland
+sys-apps/xdg-desktop-portal
+gui-libs/xdg-desktop-portal-hyprland
+sys-apps/xdg-desktop-portal-gtk
+x11-themes/bibata-xcursors
+media-fonts/noto
+media-fonts/noto-emoji
+media-fonts/nerd-fonts
+gui-libs/greetd
+gui-apps/tuigreet
+
+# F. Development and diagnosis
+app-editors/neovim
+dev-vcs/git
+app-portage/gentoolkit
+
+# G. Quality of life
+sys-process/btop
+app-misc/fastfetch
+gui-apps/grim
+gui-apps/slurp
+gui-apps/wl-clipboard
+gui-apps/wf-recorder
+sys-power/brightnessctl
+x11-libs/libnotify
+
+# H. Datum-specific components
+# Configuration is supplied by the root overlay, not a package atom.

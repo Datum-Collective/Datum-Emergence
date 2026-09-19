@@ -1,0 +1,5 @@
+gui-apps/waybar network tray wifi
+media-fonts/nerd-fonts jetbrains
+net-wireless/wpa_supplicant tkip
+sys-kernel/installkernel dracut
+sys-boot/grub grub_platforms_efi-64

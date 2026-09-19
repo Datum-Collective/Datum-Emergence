@@ -1,0 +1,10 @@
+build/
+work/
+dist/
+*.iso
+*.DIGESTS
+*.CONTENTS*
+*.tar.xz
+*.tar.zst
+*.sqfs
+.env

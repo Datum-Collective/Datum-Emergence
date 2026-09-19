@@ -1,0 +1,4 @@
+# Read-only audit reference, never fed directly to emerge.
+# Personal/excluded: docker, browsers, Slack, Obsidian, MPD/Cava, Chrome,
+# NVIDIA driver, Rust toolchain, and archive/terminal novelty packages.
+# See /tmp/emergence-audit on the reference host for the untracked audit report.

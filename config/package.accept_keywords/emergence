@@ -1,0 +1,3 @@
+# Keep this empty by default. The original reference used the hyproverlay and
+# broad unstable keywords; Emergence's baseline must use Gentoo's tree unless
+# a reviewed, pinned overlay is introduced.
