@@ -16,18 +16,16 @@ administration model.
 
 ## Download
 
-Testing ISO (v0.1.0 prerelease, UEFI x86_64 live + installer):
+Testing ISO (v0.1.1 prerelease, UEFI x86_64 live + installer):
 
-- [emergence-amd64.iso.xz.part-00](https://github.com/Datum-Collective/Datum-Emergence/releases/latest/download/emergence-amd64.iso.xz.part-00)
-- [emergence-amd64.iso.xz.part-01](https://github.com/Datum-Collective/Datum-Emergence/releases/latest/download/emergence-amd64.iso.xz.part-01)
+- [emergence-amd64.iso](https://github.com/Datum-Collective/Datum-Emergence/releases/latest/download/emergence-amd64.iso)
+  (2,088,609,792 bytes, SHA256
+  `295b1034417321d9e91899fcc5f1f573aeddabac8e829f5892009df30b7d091a`)
 
-The live ISO is split because it exceeds GitHub's 2 GiB per-asset limit.
-Reassemble, verify, and decompress (Linux):
+Verify after downloading (Linux):
 
 ```sh
-cat emergence-amd64.iso.xz.part-* > emergence-amd64.iso.xz
-sha256sum emergence-amd64.iso.xz   # must match the checksum in the release notes
-xz -d emergence-amd64.iso.xz       # produces emergence-amd64.iso
+sha256sum emergence-amd64.iso   # must match the checksum above
 ```
 
 Write it to a USB drive (replace `sdX` with your device, triple-checked):
