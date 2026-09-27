@@ -3,7 +3,8 @@ version_stamp: @VERSION_STAMP@
 target: livecd-stage1
 rel_type: datum
 profile: default/linux/amd64/23.0/desktop/systemd
-snapshot: @SNAPSHOT_NAME@
+snapshot_treeish: @SNAPSHOT_NAME@
 source_subpath: datum/@STAGE3_NAME@
 portage_confdir: @PROJECT_ROOT@/config
+repos: @OVERLAY_REPOS@
 livecd/packages: @PACKAGES@

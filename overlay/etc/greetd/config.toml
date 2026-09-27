@@ -2,9 +2,9 @@
 vt = 1
 
 [initial_session]
-command = "dbus-run-session Hyprland"
+command = "dbus-run-session /usr/local/bin/start-datum"
 user = "emergence"
 
 [default_session]
-command = "tuigreet --greeting 'Datum Emergence' --cmd 'dbus-run-session Hyprland'"
-user = "greeter"
+command = "tuigreet --greeting 'Datum Emergence' --cmd 'dbus-run-session /usr/local/bin/start-datum'"
+user = "greetd"

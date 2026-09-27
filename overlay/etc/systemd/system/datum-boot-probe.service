@@ -1,0 +1,12 @@
+[Unit]
+Description=Datum boot self-check probe
+After=greetd.service NetworkManager.service multi-user.target
+Wants=NetworkManager.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/datum-boot-probe
+RemainAfterExit=no
+
+[Install]
+WantedBy=multi-user.target

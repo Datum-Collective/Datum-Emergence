@@ -1,0 +1,176 @@
+#!/bin/sh
+# datum-boot-probe: one-shot live/installed boot self-check.
+#
+# Waits for the graphical live session to settle, then records what actually
+# came up: systemd state, services, the greetd/Hyprland session, and Datum
+# branding. Results go to the journal, /dev/kmsg, /dev/ttyS0 (captured by
+# hypervisors with a serial console), and /run/datum-boot-probe.result.
+# Always exits 0; it reports, it never fails the boot.
+set -eu
+
+RESULT=/run/datum-boot-probe.result
+SERIAL=/dev/ttyS0
+
+emit() {
+  printf 'DATUM_PROBE %s\n' "$*" >> "$RESULT"
+  printf 'DATUM_PROBE %s\n' "$*" > /dev/kmsg 2>/dev/null || true
+  printf 'DATUM_PROBE %s\n' "$*" > "$SERIAL" 2>/dev/null || true
+  logger -t datum-boot-probe -- "$*" 2>/dev/null || true
+}
+
+: > "$RESULT" 2>/dev/null || RESULT=/tmp/datum-boot-probe.result
+: > "$RESULT" 2>/dev/null || exit 0
+
+emit "begin $(date -u +%FT%TZ) $(cat /proc/cmdline 2>/dev/null)"
+
+# System state.
+if command -v systemctl >/dev/null 2>&1; then
+  emit "system=$(systemctl is-system-running 2>/dev/null || echo unknown)"
+  for svc in NetworkManager.service greetd.service datum-firstboot.service; do
+    if systemctl list-unit-files "$svc" >/dev/null 2>&1; then
+      emit "service.$svc=$(systemctl is-active $svc 2>/dev/null || echo unknown)"
+    fi
+  done
+fi
+
+# Live media detection.
+if test -e /dev/disk/by-label/DATUM_EMERGENCE_AMD64; then
+  emit "live-media=present"
+else
+  emit "live-media=absent(installed?)"
+fi
+
+# Wait for the autologin session (greetd starts it a few seconds after boot).
+# The live session runs as 'emergence', an installed session as the first
+# local user, so detect whoever is actually logged in.
+SESSION_USER=""
+for i in $(seq 1 30); do
+  for u in emergence datum; do
+    if loginctl show-user "$u" >/dev/null 2>&1; then
+      SESSION_USER=$u
+      break 2
+    fi
+  done
+  sleep 2
+done
+if test -n "$SESSION_USER"; then
+  emit "user.session=yes($SESSION_USER)"
+else
+  emit "user.session=no"
+fi
+# Backwards-compatible live keys (empty on installed systems by design).
+if loginctl show-user emergence >/dev/null 2>&1; then
+  emit "user.emergence.session=yes"
+else
+  emit "user.emergence.session=no"
+fi
+
+HYPRLAND=no
+WAYLAND_SOCK=no
+APPS_SEEN=""
+if test -n "$SESSION_USER"; then
+  # Poll: the compositor and its exec-once apps can take seconds to appear
+  # after the session registers. A single check races startup.
+  for i in $(seq 1 12); do
+    if pgrep -u "$SESSION_USER" -x Hyprland >/dev/null 2>&1; then
+      HYPRLAND=yes
+    fi
+    # Any UID's runtime dir (live emergence is 1000, installed users differ).
+    for rtdir in /run/user/*; do
+      for sock in "$rtdir"/wayland-* "$rtdir"/hypr/*/.hyprland.sock "$rtdir"/hypr/*/hyprland.sock; do
+        if test -S "$sock" 2>/dev/null || test -e "$sock" 2>/dev/null; then
+          WAYLAND_SOCK="$sock"
+          break 2
+        fi
+      done
+    done
+    if test "$HYPRLAND" = yes && test "$WAYLAND_SOCK" != no; then
+      break
+    fi
+    sleep 5
+  done
+fi
+emit "user.session.hyprland=$HYPRLAND"
+emit "user.session.wayland-socket=$WAYLAND_SOCK"
+if test "$SESSION_USER" = emergence; then
+  emit "user.emergence.hyprland=$HYPRLAND"
+fi
+# Compositor helpers: are they alive, and what did they log?
+if test -n "$SESSION_USER"; then
+  for app in hyprpaper waybar dunst wofi kitty Hyprland; do
+    if pgrep -u "$SESSION_USER" -x "$app" >/dev/null 2>&1; then
+      emit "user.session.app.$app=running"
+    else
+      emit "user.session.app.$app=absent"
+    fi
+  done
+fi
+# Ask the compositor about outputs and the running hyprpaper what it loaded.
+if test -n "$SESSION_USER"; then
+  SUID=$(id -u "$SESSION_USER" 2>/dev/null || echo "")
+  if test -n "$SUID"; then
+    for HDIR in /run/user/"$SUID"/hypr/*; do
+      test -d "$HDIR" || continue
+      SIG=$(basename "$HDIR")
+      MONS=$(sudo -n -u "$SESSION_USER" env "HYPRLAND_INSTANCE_SIGNATURE=$SIG" "XDG_RUNTIME_DIR=/run/user/$SUID" hyprctl monitors 2>&1 | grep -E '^Monitor' | tr '\n' ';' | cut -c1-200)
+      emit "hyprland.monitors=$MONS"
+    done
+  fi
+fi
+if command -v journalctl >/dev/null 2>&1; then
+  journalctl --no-pager _COMM=hyprpaper 2>/dev/null | tail -n 8 | while IFS= read -r line; do
+    emit "hyprpaper.log: $(printf '%s' "$line" | cut -c1-200)"
+  done
+fi
+if command -v journalctl >/dev/null 2>&1; then
+  # Exclude our own logger lines, which would otherwise drown real errors.
+  journalctl --no-pager -p warning --grep='hyprpaper|hyprland|wallpaper|greetd|tuigreet' 2>/dev/null | grep -v 'DATUM_PROBE' | head -n 10 | while IFS= read -r line; do
+    emit "journal.err: $(printf '%s' "$line" | cut -c1-200)"
+  done
+fi
+
+# Branding / identity.
+for f in /usr/share/backgrounds/datum-emergence/wallpaper.png /etc/emergence/release /etc/hostname; do
+  if test -e "$f"; then
+    emit "file.$f=present"
+  else
+    emit "file.$f=MISSING"
+  fi
+done
+if test -e /etc/hostname; then
+  emit "hostname=$(cat /etc/hostname 2>/dev/null)"
+fi
+
+# Installation verification (meaningful on installed systems; on the live
+# ISO these just record live state).
+if test -e /dev/disk/by-label/DATUM_EMERGENCE_AMD64; then
+  emit "installer.fstab-root=live-iso"
+else
+  if grep -Eq '^UUID=[^ ]+ +/ +ext4' /etc/fstab 2>/dev/null; then
+    emit "installer.fstab-root=uuid-ok"
+  else
+    emit "installer.fstab-root=BAD"
+  fi
+  if grep -Eq '^UUID=[^ ]+ +/boot/efi +vfat' /etc/fstab 2>/dev/null; then
+    emit "installer.fstab-efi=uuid-ok"
+  else
+    emit "installer.fstab-efi=BAD"
+  fi
+  if test -e /boot/efi/EFI/BOOT/BOOTX64.EFI; then
+    emit "installer.removable-bootloader=present"
+  else
+    emit "installer.removable-bootloader=MISSING"
+  fi
+  if getent passwd emergence >/dev/null 2>&1; then
+    emit "installer.live-user-removed=no(STILL PRESENT)"
+  else
+    emit "installer.live-user-removed=yes"
+  fi
+fi
+# First local user: the account the current graphical session runs as, if any.
+if command -v loginctl >/dev/null 2>&1; then
+  emit "session.users=$(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}' | tr '\n' ',' || echo unknown)"
+fi
+
+emit end
+exit 0

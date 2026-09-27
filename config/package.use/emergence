@@ -1,5 +1,12 @@
 gui-apps/waybar network tray wifi
-media-fonts/nerd-fonts jetbrains
+dev-libs/libdbusmenu gtk3
+# Bootstrap cycle break (suggested by portage itself): docutils needs pillow
+# at build time, and pillow[truetype] (from the desktop profile) pulls
+# harfbuzz/freetype into a docutils<->pillow<->harfbuzz<->glib cycle.
+# pillow here is a build-time dependency only; dropping truetype does not
+# affect the desktop's fonts.
+dev-python/pillow -truetype
+media-fonts/nerdfonts jetbrainsmono
 net-wireless/wpa_supplicant tkip
 sys-kernel/installkernel dracut
 sys-boot/grub grub_platforms_efi-64

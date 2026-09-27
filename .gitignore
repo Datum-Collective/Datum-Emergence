@@ -8,3 +8,5 @@ dist/
 *.tar.zst
 *.sqfs
 .env
+emergence-test-*
+*.raw

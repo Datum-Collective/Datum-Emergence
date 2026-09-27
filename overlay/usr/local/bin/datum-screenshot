@@ -1,4 +1,0 @@
-#!/bin/sh
-set -eu
-grim -g "$(slurp)" - | wl-copy
-notify-send 'Datum Emergence' 'Screenshot copied to clipboard'

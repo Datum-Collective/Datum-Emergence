@@ -1,0 +1,5 @@
+# Catalyst rewrites /etc/portage/make.conf inside the chroot (dropping
+# ACCEPT_LICENSE from config/make.conf), so license acceptances that must
+# survive a Catalyst build live here. Keep this scoped to firmware blobs the
+# live image genuinely needs for hardware support.
+sys-kernel/linux-firmware linux-fw-redistributable

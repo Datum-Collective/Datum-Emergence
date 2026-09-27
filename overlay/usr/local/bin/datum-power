@@ -1,8 +1,0 @@
-#!/bin/sh
-set -eu
-choice=$(printf '%s\n' '⏻ Shutdown' '↻ Reboot' '⇦ Logout' | wofi --dmenu --prompt Power --width 320 --height 210)
-case "$choice" in
-  '⏻ Shutdown') systemctl poweroff ;;
-  '↻ Reboot') systemctl reboot ;;
-  '⇦ Logout') hyprctl dispatch exit ;;
-esac

@@ -1,0 +1,294 @@
+#!/bin/sh
+# datum-install: install the running Datum Emergence live system to a disk.
+#
+# Usage:
+#   sudo datum-install --disk /dev/vdX [--hostname NAME] [--user NAME]
+#                      [--timezone ZONE] [--yes] [--reboot]
+#
+# The installer partitions the target with a GPT (512M EFI System Partition
+# + root), copies the live system with tar, writes fstab, installs GRUB for
+# UEFI (including the removable fallback), creates the first local user, and
+# removes live-only identity. The target disk is fully overwritten.
+#
+# Password: prompted twice on the terminal, or taken from
+# EMERGENCE_INSTALL_PASSWORD (used by automated VM installs).
+set -eu
+
+PROG=datum-install
+MNT=/mnt/datum-target
+ESP_SIZE_MIB=512
+MIN_DISK_MIB=10240
+
+info() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+die() { printf '%s: error: %s\n' "$PROG" "$*" >&2; exit 1; }
+need() { command -v "$1" >/dev/null 2>&1 || die "required tool not found in live image: $1"; }
+
+usage() {
+  cat >&2 <<EOF
+usage: $PROG --disk DEVICE [--hostname NAME] [--user NAME] [--timezone ZONE] [--yes] [--reboot]
+  --disk      target block device (e.g. /dev/vda). ALL DATA ON IT IS DESTROYED.
+  --hostname  installed hostname (default: emergence)
+  --user      first local user (default: datum; must differ from live 'emergence')
+  --timezone  e.g. UTC, Europe/Berlin (default: UTC)
+  --yes       confirm the destructive operation (also prints the plan first)
+  --reboot    reboot when finished
+EOF
+  exit 2
+}
+
+DISK=""
+HOSTNAME=emergence
+NEWUSER=datum
+TIMEZONE=UTC
+CONFIRM=no
+REBOOT=no
+
+while test $# -gt 0; do
+  case "$1" in
+    --disk) DISK=${2:?--disk needs a value}; shift 2 ;;
+    --hostname) HOSTNAME=${2:?--hostname needs a value}; shift 2 ;;
+    --user) NEWUSER=${2:?--user needs a value}; shift 2 ;;
+    --timezone) TIMEZONE=${2:?--timezone needs a value}; shift 2 ;;
+    --yes) CONFIRM=yes; shift ;;
+    --reboot) REBOOT=yes; shift ;;
+    -h|--help) usage ;;
+    *) usage ;;
+  esac
+done
+
+test -n "$DISK" || usage
+test "$(id -u)" -eq 0 || die "run as root (e.g. with sudo)"
+need sfdisk; need mkfs.vfat; need mkfs.ext4; need blkid; need lsblk
+need tar; need grub-install; need grub-mkconfig; need systemd-machine-id-setup
+need useradd; need chpasswd; need passwd; need udevadm
+
+# Validate names before touching the disk.
+case "$HOSTNAME" in
+  *[!a-zA-Z0-9-]*|"") die "invalid hostname: $HOSTNAME" ;;
+esac
+case "$NEWUSER" in
+  ""|root|emergence|greeter|*[^a-z0-9_-]*|-[a-z0-9_-]*|[0-9]*) die "invalid username: $NEWUSER (must not be root/emergence/greeter)" ;;
+esac
+test -f "/usr/share/zoneinfo/$TIMEZONE" || die "unknown timezone: $TIMEZONE"
+test -b "$DISK" || die "not a block device: $DISK"
+
+# Refuse targets that are obviously wrong.
+if grep -Eq "^[^ ]+ $MNT( |/)" /proc/mounts; then
+  die "$MNT is already in use; unmount a previous install first"
+fi
+for part in $(lsblk -ln -o PATH "$DISK" 2>/dev/null | tail -n +2); do
+  if grep -Eq "^[^ ]+ $part " /proc/mounts || findmnt -n -o TARGET "$part" >/dev/null 2>&1; then
+    test "$part" = "$DISK" && continue
+    die "refusing: $part (on $DISK) is currently mounted"
+  fi
+done
+# Refuse the device the live ISO itself booted from (best effort).
+for cand in /mnt/cdrom /run/live /run/archiso/bootmnt; do
+  if findmnt -n -o SOURCE "$cand" >/dev/null 2>&1; then
+    live_src=$(findmnt -n -o SOURCE "$cand")
+    case "$live_src" in
+      "$DISK"*) die "refusing: $DISK provides the running live image ($cand on $live_src)" ;;
+    esac
+  fi
+done
+
+DISK_MIB=$(($(lsblk -bn -o SIZE -d "$DISK") / 1048576))
+test "$DISK_MIB" -ge "$MIN_DISK_MIB" || die "$DISK is only ${DISK_MIB}MiB (need >= ${MIN_DISK_MIB}MiB)"
+
+info "plan:"
+info "  disk:     $DISK (${DISK_MIB}MiB) -- ALL DATA WILL BE DESTROYED"
+info "  layout:   GPT: p1 ${ESP_SIZE_MIB}MiB ESP (FAT32), p2 rest root (ext4)"
+info "  hostname: $HOSTNAME"
+info "  user:     $NEWUSER (live 'emergence' account is removed)"
+info "  timezone: $TIMEZONE"
+info "  boot:     GRUB x86_64-efi (NVRAM entry + removable fallback)"
+lsblk "$DISK" >&2 || true
+test "$CONFIRM" = yes || die "re-run with --yes to confirm destruction of $DISK"
+
+# Password for the new user.
+if test -n "${EMERGENCE_INSTALL_PASSWORD:-}"; then
+  info "using password from EMERGENCE_INSTALL_PASSWORD"
+  NEW_PASSWORD=$EMERGENCE_INSTALL_PASSWORD
+else
+  test -c /dev/tty || die "no terminal for password prompt; set EMERGENCE_INSTALL_PASSWORD"
+  stty -echo < /dev/tty
+  trap 'stty echo < /dev/tty' EXIT INT TERM
+  printf 'password for %s: ' "$NEWUSER" > /dev/tty
+  IFS= read -r NEW_PASSWORD < /dev/tty
+  printf '\nrepeat password: ' > /dev/tty
+  IFS= read -r NEW_PASSWORD2 < /dev/tty
+  stty echo < /dev/tty
+  trap - EXIT INT TERM
+  printf '\n' > /dev/tty
+  test -n "$NEW_PASSWORD" || die "empty password refused"
+  test "$NEW_PASSWORD" = "$NEW_PASSWORD2" || die "passwords do not match"
+fi
+
+# Partition (sectors throughout: the only unit every sfdisk accepts; 2048 =
+# 1MiB alignment, 1048576 sectors = 512MiB ESP). Types are full GPT GUIDs:
+# sfdisk 2.42 rejects MBR codes like 83 on GPT labels.
+info "partitioning $DISK ..."
+sfdisk --wipe always "$DISK" <<EOF
+label: gpt
+unit: sectors
+start=2048, size=1048576, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+start=1050624, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4
+EOF
+# Wait for partition nodes with or without a running udev daemon (the
+# installer also runs from minimal shells where udevadm has no daemon).
+partx -u "$DISK" 2>/dev/null || true
+udevadm settle 2>/dev/null || sleep 2
+ESP=${DISK}1
+ROOTP=${DISK}2
+case "$DISK" in
+  *[0-9]) ESP=${DISK}p1; ROOTP=${DISK}p2 ;; # /dev/nvme0n1, /dev/mmcblk0, ...
+esac
+for i in $(seq 1 15); do
+  test -b "$ESP" && test -b "$ROOTP" && break
+  partx -u "$DISK" 2>/dev/null || true
+  sleep 2
+done
+test -b "$ESP" || die "EFI partition did not appear: $ESP"
+test -b "$ROOTP" || die "root partition did not appear: $ROOTP"
+
+info "creating filesystems ..."
+mkfs.vfat -F 32 -n DATUM_EFI "$ESP"
+mkfs.ext4 -q -L datum-root -F "$ROOTP"
+
+info "mounting target ..."
+cleanup() {
+  umount -R "$MNT" 2>/dev/null || true
+}
+trap 'cleanup' EXIT INT TERM
+mkdir -p "$MNT"
+mount "$ROOTP" "$MNT"
+mkdir -p "$MNT/boot/efi"
+mount "$ESP" "$MNT/boot/efi"
+
+info "copying live system (this takes a few minutes) ..."
+# NOTE: no --xattrs/--acls. The live overlayfs does not support listing
+# xattrs, so those flags only produce thousands of failing syscalls (and, in
+# a VM without a serial reader, enough warning spam to stall the copy on
+# backpressure). Modes, ownership and timestamps are preserved; the image
+# carries no file capabilities that would be lost (setuid bits are modes).
+tar -C / --one-file-system \
+  --exclude=./dev/* --exclude=./proc/* --exclude=./sys/* \
+  --exclude=./tmp/* --exclude=./run/* --exclude=./mnt/* --exclude=./media/* \
+  --exclude=./lost+found \
+  -cf - . | tar -C "$MNT" -xpf -
+mkdir -p "$MNT/dev" "$MNT/proc" "$MNT/sys" "$MNT/run" "$MNT/tmp" "$MNT/mnt" "$MNT/media"
+chmod 1777 "$MNT/tmp"
+
+# fstab by UUID.
+ROOT_UUID=$(blkid -s UUID -o value "$ROOTP")
+ESP_UUID=$(blkid -s UUID -o value "$ESP")
+cat > "$MNT/etc/fstab" <<EOF
+# Datum Emergence installed system (written by $PROG).
+UUID=$ROOT_UUID  /          ext4  defaults           0 1
+UUID=$ESP_UUID   /boot/efi  vfat  defaults           0 2
+tmpfs            /tmp       tmpfs nodev,nosuid       0 0
+EOF
+
+# Chroot scaffolding for target configuration.
+mount --bind /dev "$MNT/dev"
+mount --bind /dev/pts "$MNT/dev/pts"
+mount -t proc none "$MNT/proc"
+mount --bind /sys "$MNT/sys"
+mount --bind /run "$MNT/run"
+# Best-effort: absent on minimal boots (e.g. init=/bin/sh without
+# NetworkManager); nothing during installation needs name resolution.
+cp -f /etc/resolv.conf "$MNT/etc/resolv.conf" 2>/dev/null || true
+
+target() { chroot "$MNT" /bin/sh -c "$1"; }
+
+info "configuring installed system ..."
+printf '%s\n' "$HOSTNAME" > "$MNT/etc/hostname"
+cat > "$MNT/etc/hosts" <<EOF
+127.0.0.1  localhost
+::1        localhost
+127.0.1.1  $HOSTNAME.localdomain $HOSTNAME
+EOF
+# Fresh machine identity (never carry the live session's over).
+rm -f "$MNT/etc/machine-id" "$MNT/var/lib/dbus/machine-id"
+target "systemd-machine-id-setup"
+# The live 'emergence' account cannot be deleted here: its session owns the
+# processes we run from. A one-shot first-boot service removes it on the
+# installed system (where it has no processes) and then removes itself.
+mkdir -p "$MNT/usr/local/sbin"
+cat > "$MNT/usr/local/sbin/datum-firstboot" <<'FIRSTBOOT_EOF'
+#!/bin/sh
+# One-shot: remove the live-session account inherited from the ISO image.
+set -eu
+if getent passwd emergence >/dev/null 2>&1; then
+  loginctl terminate-user emergence 2>/dev/null || true
+  sleep 2
+  userdel -r emergence 2>/dev/null || userdel emergence 2>/dev/null || {
+    passwd -l emergence
+    usermod -s /sbin/nologin -e 1 emergence
+  }
+fi
+systemctl disable datum-firstboot.service
+rm -f /etc/systemd/system/datum-firstboot.service /usr/local/sbin/datum-firstboot
+systemctl daemon-reload
+FIRSTBOOT_EOF
+chmod 755 "$MNT/usr/local/sbin/datum-firstboot"
+cat > "$MNT/etc/systemd/system/datum-firstboot.service" <<'SERVICE_EOF'
+[Unit]
+Description=Datum one-shot live-account cleanup
+After=network-pre.target
+Before=greetd.service
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/datum-firstboot
+[Install]
+WantedBy=multi-user.target
+SERVICE_EOF
+target "systemctl enable datum-firstboot.service"
+for g in wheel users audio video render input plugdev; do
+  target "getent group $g >/dev/null || groupadd -r $g"
+done
+target "useradd -m -s /bin/bash -G wheel,users,audio,video,render,input,plugdev $NEWUSER"
+printf '%s:%s\n' "$NEWUSER" "$NEW_PASSWORD" | target "chpasswd"
+NEW_PASSWORD=x; unset NEW_PASSWORD
+target "passwd -l root || true"
+# The live session autologs the live user; point it at the installed user.
+if grep -q '^user = "emergence"' "$MNT/etc/greetd/config.toml"; then
+  sed -i 's/^user = "emergence"$/user = "'"$NEWUSER"'"/' "$MNT/etc/greetd/config.toml"
+fi
+# Timezone.
+ln -sf "/usr/share/zoneinfo/$TIMEZONE" "$MNT/etc/localtime"
+
+# Bootloader. The dist-kernel + dracut initramfs are already in /boot from the
+# live image; just (re)install GRUB and generate the config on the target.
+# The removable fallback (BOOTX64.EFI) is mandatory: it is what boots on
+# firmware without a registered entry (many VMs, some boards). The NVRAM
+# entry is best-effort so installs also succeed where efivars is unavailable.
+test -e "$MNT"/boot/vmlinuz-* || die "no kernel in target /boot; refusing to leave an unbootable system"
+target "grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --recheck"
+if ! target "grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=datum --recheck"; then
+  info "NVRAM boot entry could not be registered; removable fallback installed"
+fi
+target "grub-mkconfig -o /boot/grub/grub.cfg"
+# grub-mkconfig falls back to unstable device names (root=/dev/...) when it
+# cannot resolve UUIDs (no udev, unusual topologies). Device names shift
+# across boots (USB media added/removed), so enforce the UUID root that the
+# installer already wrote to fstab.
+if grep -Eq "^[[:space:]]*linux[[:space:]]" "$MNT/boot/grub/grub.cfg"; then
+  sed -i -E '/^[[:space:]]*linux[[:space:]]/ s#root=[^ ]+#root=UUID='"$ROOT_UUID"'#' "$MNT/boot/grub/grub.cfg"
+  grep -Eq "root=UUID=$ROOT_UUID" "$MNT/boot/grub/grub.cfg" || die "could not enforce UUID root in grub.cfg"
+fi
+
+# Installed system keeps the intended services (symlinks were copied over,
+# but re-enable to be certain they resolve on the target).
+target "systemctl enable NetworkManager.service greetd.service"
+
+info "unmounting ..."
+trap - EXIT INT TERM
+umount -R "$MNT"
+rmdir "$MNT" 2>/dev/null || true
+info "installed Datum Emergence on $DISK (user $NEWUSER, host $HOSTNAME)."
+info "remove the live ISO and boot from $DISK."
+if test "$REBOOT" = yes; then
+  info "rebooting ..."
+  reboot
+fi

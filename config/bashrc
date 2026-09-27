@@ -1,0 +1,32 @@
+# /etc/portage/bashrc for Emergence builds (copied into the chroot via
+# portage_confdir, and therefore also present on live/installed systems).
+#
+# Catalyst's dist-kernel path (kmerge.sh) archives /boot with the patterns
+# "System.map* config* initramfs* vmlinuz* vmlinux*" and its ISO step only
+# renames those into the bootable "gentoo"/"gentoo.igz" names. But Gentoo's
+# installkernel installs an x86 bzImage as /boot/kernel-<version>, which
+# matches none of the tar patterns, so the kernel was silently left out of
+# the ISO (unbootable, no error). Normalize the name right after the kernel
+# package installs so every consumer (kmerge, grub-mkconfig, the installer)
+# sees the canonical vmlinuz-<version> name.
+#
+# NOTE: this must be a post_pkg_postinst() hook, not top-level code and not
+# a bare postinst() function. Top-level bashrc code runs BEFORE the ebuild's
+# pkg_postinst (i.e. before installkernel places the image), and portage
+# only dispatches pre_pkg_*()/post_pkg_*() hook names around each phase.
+# post_pkg_postinst() runs after the ebuild's pkg_postinst.
+post_pkg_postinst() {
+  if [[ ${CATEGORY}/${PN} == sys-kernel/gentoo-kernel ]]; then
+    local kimg vimg
+    for kimg in "${EROOT}"/boot/kernel-*; do
+      [[ -e ${kimg} ]] || continue
+      # Never clobber an image installkernel already named correctly.
+      vimg=${kimg%/kernel-*}
+      vimg=${vimg}/vmlinuz-${kimg##*/kernel-}
+      if [[ ! -e ${vimg} ]]; then
+        mv "${kimg}" "${vimg}"
+      fi
+    done
+  fi
+  return 0
+}

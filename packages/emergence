@@ -7,6 +7,7 @@ sys-apps/dbus
 sys-apps/pciutils
 sys-kernel/linux-firmware
 sys-boot/grub
+app-admin/sudo
 
 # B. Desktop
 gui-wm/hyprland
@@ -39,7 +40,7 @@ sys-apps/xdg-desktop-portal-gtk
 x11-themes/bibata-xcursors
 media-fonts/noto
 media-fonts/noto-emoji
-media-fonts/nerd-fonts
+media-fonts/nerdfonts
 gui-libs/greetd
 gui-apps/tuigreet
 
@@ -47,6 +48,10 @@ gui-apps/tuigreet
 app-editors/neovim
 dev-vcs/git
 app-portage/gentoolkit
+# NOTE: app-shells/starship entered the manifest with the rice cross-check
+# but its binary is not in stage1 images built before the next stage1 run;
+# its config (skel starship.toml) ships regardless. See README known gaps.
+app-shells/starship
 
 # G. Quality of life
 sys-process/btop
@@ -55,8 +60,14 @@ gui-apps/grim
 gui-apps/slurp
 gui-apps/wl-clipboard
 gui-apps/wf-recorder
-sys-power/brightnessctl
+sys-power/acpilight
 x11-libs/libnotify
 
 # H. Datum-specific components
 # Configuration is supplied by the root overlay, not a package atom.
+
+# I. Installer (live environment only)
+# Partitioning/copying use base-system sfdisk and tar (gptfdisk and rsync are
+# not in the pinned tree). FAT and UEFI boot-entry tooling must be explicit.
+sys-fs/dosfstools
+sys-boot/efibootmgr

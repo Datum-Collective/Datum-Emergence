@@ -1,3 +1,30 @@
-# Keep this empty by default. The original reference used the hyproverlay and
-# broad unstable keywords; Emergence's baseline must use Gentoo's tree unless
-# a reviewed, pinned overlay is introduced.
+# Pinned-overlay keywords. The pinned Gentoo snapshot no longer carries the
+# Hyprland stack (gui-wm/hyprland was treecleaned in Mar 2026) or several
+# desktop utilities, so Emergence pins two reviewed overlays at fixed commits
+# (see build.sh: EMERGENCE_GURU_COMMIT / EMERGENCE_HYPROVERLAY_COMMIT).
+# Only the atoms below (plus their ~amd64-only overlay dependencies) are
+# accepted from those overlays; the baseline remains the Gentoo tree.
+gui-wm/hyprland ~amd64
+gui-apps/hyprpaper ~amd64
+gui-libs/xdg-desktop-portal-hyprland ~amd64
+dev-libs/hyprlang ~amd64
+dev-libs/hyprgraphics ~amd64
+dev-libs/hyprland-protocols ~amd64
+dev-util/hyprwayland-scanner ~amd64
+gui-libs/aquamarine ~amd64
+gui-libs/hyprcursor ~amd64
+gui-libs/hyprutils ~amd64
+gui-libs/hyprwire ~amd64
+gui-libs/hyprland-guiutils ~amd64
+app-misc/yazi ~amd64
+x11-themes/bibata-xcursors ~amd64
+media-fonts/nerdfonts ~amd64
+# In-tree but ~amd64-only at the pinned snapshot (no stable ebuild left).
+gui-apps/wf-recorder ~amd64
+# Transitive in-tree dependencies required at ~amd64 versions by the overlay
+# stack (resolved against the pinned snapshot, not guessed).
+dev-cpp/sdbus-c++ ~amd64
+>=dev-libs/wayland-protocols-1.49 ~amd64
+# Overlay dependencies of the Hyprland stack itself.
+dev-cpp/glaze ~amd64
+gui-libs/hyprtoolkit ~amd64
