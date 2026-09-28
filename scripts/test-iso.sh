@@ -95,22 +95,25 @@ if test "$MODE" = interactive; then
 fi
 
 # CI mode: headless, serial console to the log, quit after WAIT seconds.
-# (Only --ci takes a caller-supplied log path; --firstboot uses a private one.)
-test "$MODE" = ci && test -z "$SERIAL_LOG" && { printf '%s\n' 'test-iso: --ci needs a log path' >&2; exit 2; }
-test -n "$SERIAL_LOG" && : > "$SERIAL_LOG"
-# shellcheck disable=SC2086
-set -- qemu-system-x86_64 -m "$MEM" -smp "$SMP" -accel "$accel" -cpu "$cpu" \
-  -drive "$CDROM_DRIVE" -boot d $UEFI_ARGS \
-  -display none -serial "file:$SERIAL_LOG" -monitor none
-if test -n "$EXTRA_DRIVE"; then set -- "$@" -drive "file=$EXTRA_DRIVE,format=raw,if=virtio"; fi
-printf '%s\n' "test-iso: CI boot with $accel and $FW_DESC (wait ${WAIT}s, log $SERIAL_LOG)." >&2
-"$@" &
-QEMU_PID=$!
-sleep "$WAIT"
-kill "$QEMU_PID" 2>/dev/null || true
-wait "$QEMU_PID" 2>/dev/null || true
-cleanup
-trap - EXIT INT TERM
+# (Only --ci takes a caller-supplied log path; --firstboot uses a private
+# one and boots its own QEMU below, so this block is ci-only.)
+if test "$MODE" = ci; then
+  test -n "$SERIAL_LOG" || { printf '%s\n' 'test-iso: --ci needs a log path' >&2; exit 2; }
+  : > "$SERIAL_LOG"
+  # shellcheck disable=SC2086
+  set -- qemu-system-x86_64 -m "$MEM" -smp "$SMP" -accel "$accel" -cpu "$cpu" \
+    -drive "$CDROM_DRIVE" -boot d $UEFI_ARGS \
+    -display none -serial "file:$SERIAL_LOG" -monitor none
+  if test -n "$EXTRA_DRIVE"; then set -- "$@" -drive "file=$EXTRA_DRIVE,format=raw,if=virtio"; fi
+  printf '%s\n' "test-iso: CI boot with $accel and $FW_DESC (wait ${WAIT}s, log $SERIAL_LOG)." >&2
+  "$@" &
+  QEMU_PID=$!
+  sleep "$WAIT"
+  kill "$QEMU_PID" 2>/dev/null || true
+  wait "$QEMU_PID" 2>/dev/null || true
+  cleanup
+  trap - EXIT INT TERM
+fi
 
 # Verdict from the in-image probe.
 probe_verdict() {

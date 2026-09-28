@@ -86,6 +86,8 @@ grep -q 'installer.live-user-removed' "$root/overlay/usr/local/bin/datum-boot-pr
 # and the driver must wait for the probe instead of killing QEMU right after
 # typing the login.
 grep -q 'DATUM_PROBE end' "$root/scripts/test-iso.sh"
+# Firstboot mode boots its own QEMU; the plain CI boot block is ci-only.
+grep -q 'if test "$MODE" = ci; then' "$root/scripts/test-iso.sh"
 grep -q 'TARGET_VERIFY_OK' "$root/scripts/test-install.sh"
 grep -q 'live-user simulation' "$root/scripts/test-install.sh"
 test -f "$root/config/bashrc"
