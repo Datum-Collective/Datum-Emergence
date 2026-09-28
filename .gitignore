@@ -10,3 +10,4 @@ dist/
 .env
 emergence-test-*
 *.raw
+emergence-install-serial-live.log
