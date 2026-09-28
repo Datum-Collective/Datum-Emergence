@@ -88,7 +88,7 @@ grep -q 'installer.live-user-removed' "$root/overlay/usr/local/bin/datum-boot-pr
 grep -q 'DATUM_PROBE end' "$root/scripts/test-iso.sh"
 # Firstboot mode boots its own QEMU; the plain CI boot block is ci-only.
 grep -q 'if test "$MODE" = ci; then' "$root/scripts/test-iso.sh"
-grep -q 'live-user simulation' "$root/scripts/test-install.sh"
+grep -q 'Simulate the live firstboot lifecycle' "$root/scripts/test-install.sh"
 # Phase A uses file serial (unix serial delivered zero bytes here) plus
 # monitor typing with unshifted keys only and per-command echo tags.
 grep -q 'semicolon' "$root/scripts/test-install.sh"
