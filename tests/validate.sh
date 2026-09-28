@@ -88,10 +88,13 @@ grep -q 'installer.live-user-removed' "$root/overlay/usr/local/bin/datum-boot-pr
 grep -q 'DATUM_PROBE end' "$root/scripts/test-iso.sh"
 # Firstboot mode boots its own QEMU; the plain CI boot block is ci-only.
 grep -q 'if test "$MODE" = ci; then' "$root/scripts/test-iso.sh"
-grep -q 'TARGET_VERIFY_OK' "$root/scripts/test-install.sh"
 grep -q 'live-user simulation' "$root/scripts/test-install.sh"
-# Serial drivers must not trip on the guest tty echo of their own marker.
-grep -q 'buf.count(want) >= 2' "$root/scripts/test-install.sh"
+# Phase A uses file serial (unix serial delivered zero bytes here) plus
+# monitor typing with unshifted keys only and per-command echo tags.
+grep -q 'semicolon' "$root/scripts/test-install.sh"
+grep -q 'installed Datum Emergence' "$root/scripts/test-install.sh"
+grep -q 'loop,ro,offset' "$root/scripts/test-install.sh"
+! grep -q 'unix:$SOCK' "$root/scripts/test-install.sh"
 # The guest transcript must survive the run in the invoking directory even
 # if the workdir is cleaned before the verdict runs.
 grep -q 'emergence-install-serial-live.log' "$root/scripts/test-install.sh"
