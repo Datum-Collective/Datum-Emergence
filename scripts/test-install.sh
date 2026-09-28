@@ -65,11 +65,15 @@ xorriso -indev "$ISO" -osirrox on \
 SOCK="$WORKDIR/serial.sock"
 
 # Phase A: live boot with a root shell, run the installer, power off.
-VARS_A="$WORKDIR/ovmf-vars-a.fd"
-cp -f "$(dirname "$OVMF_CODE")/OVMF_VARS.fd" "$VARS_A" 2>/dev/null || dd if=/dev/zero of="$VARS_A" bs=1M count=4 2>/dev/null
+# Firmware note: this phase boots the extracted kernel directly (-kernel
+# with init=/bin/sh for a root shell without any login). OVMF silently
+# ignores -kernel/-initrd/-append (UEFI firmware only boots BootOrder
+# devices, so the guest would boot GRUB into the firstboot prompt instead
+# of the intended root shell), while SeaBIOS honors direct kernel boot.
+# Phase A therefore uses the default SeaBIOS firmware on purpose; Phase B
+# still boots the installed disk through OVMF, so UEFI bootloader coverage
+# is preserved where it matters.
 qemu-system-x86_64 -m 4096 -smp 4 -accel "$accel" -cpu "$cpu" \
-  -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
-  -drive "if=pflash,format=raw,file=$VARS_A" \
   -drive "file=$ISO,media=cdrom,if=virtio" \
   -drive "file=$DISK,format=raw,if=virtio" \
   -kernel "$WORKDIR/gentoo" -initrd "$WORKDIR/gentoo.igz" \
