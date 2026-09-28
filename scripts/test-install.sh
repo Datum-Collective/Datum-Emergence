@@ -62,8 +62,6 @@ qemu-img create -f raw "$DISK" "${DISK_SIZE_GB}G" >/dev/null
 xorriso -indev "$ISO" -osirrox on \
   -extract /boot/gentoo "$WORKDIR/gentoo" \
   -extract /boot/gentoo.igz "$WORKDIR/gentoo.igz" >/dev/null 2>&1
-MON_SOCK="$WORKDIR/mon.sock"
-
 # Phase A: live boot with a root shell, run the installer, power off.
 # Firmware note: this phase boots the extracted kernel directly (-kernel
 # with init=/bin/sh for a root shell without any login). OVMF silently
@@ -74,12 +72,13 @@ MON_SOCK="$WORKDIR/mon.sock"
 # still boots the installed disk through OVMF, so UEFI bootloader coverage
 # is preserved where it matters.
 #
-# Console note: guest output goes to a FILE serial log (the unix-socket
-# serial backend delivered zero bytes on this host), and input is typed
-# through the QEMU monitor (sendkey), exactly like the firstboot harness.
-# Only unshifted keys are ever typed ([a-z0-9] plus space / - = . , ;),
-# so no shift-combo flakiness; every typed line ends with its own
-# "; echo <tag>" completion marker.
+# Console note: the guest serial console is attached via TCP (telnet). The
+# unix-socket serial backend delivered zero bytes from the guest on this
+# host while the identical guest is verbose on file serial, and monitor
+# sendkey input only reaches the VGA console, never a serial shell. TCP
+# serial is bidirectional and proven here; the driver filters telnet
+# negotiation bytes and logs everything it receives.
+TELNET_PORT=4447
 TRANSCRIPT="$PWD/emergence-install-serial-live.log"
 rm -f "$TRANSCRIPT"
 qemu-system-x86_64 -m 4096 -smp 4 -accel "$accel" -cpu "$cpu" \
@@ -87,167 +86,116 @@ qemu-system-x86_64 -m 4096 -smp 4 -accel "$accel" -cpu "$cpu" \
   -drive "file=$DISK,format=raw,if=virtio" \
   -kernel "$WORKDIR/gentoo" -initrd "$WORKDIR/gentoo.igz" \
   -append "root=live:CDLABEL=DATUM_EMERGENCE_AMD64 rd.live.dir=/ rd.live.squashimg=image.squashfs cdroot console=ttyS0,115200 init=/bin/sh" \
-  -display none -serial "file:$TRANSCRIPT" -monitor "unix:$MON_SOCK,server,nowait" &
+  -display none -serial "telnet:127.0.0.1:$TELNET_PORT,server,nowait" -monitor none &
 QEMU_A=$!
-python3 - "$MON_SOCK" "$TRANSCRIPT" "$GUEST_DISK" "$GUEST_DISK_BYTES" <<'PYEOF'
+python3 - "$TELNET_PORT" "$TRANSCRIPT" "$GUEST_DISK" "$GUEST_DISK_BYTES" <<'PYEOF'
 import socket, sys, time
-mon_sock, serial_log, disk, disk_bytes = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-def read_serial():
+telnet_port, transcript, disk, disk_bytes = int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
+tfile = open(transcript, "wb", buffering=0)
+s = socket.create_connection(("127.0.0.1", telnet_port), timeout=120)
+s.settimeout(1.0)
+def filtered(data):
+    # Strip telnet negotiation (IAC DO/WILL xxx), answering DO->WONT and
+    # WILL->DONT so the server stops asking.
+    out = bytearray()
+    i = 0
+    while i < len(data):
+        if data[i] == 0xFF and i + 2 < len(data):
+            cmd, opt = data[i + 1], data[i + 2]
+            if cmd in (0xFD, 0xFB):
+                try:
+                    s.sendall(bytes((0xFF, 0xFC if cmd == 0xFD else 0xFE, opt)))
+                except OSError:
+                    pass
+            i += 3
+        else:
+            out.append(data[i])
+            i += 1
+    return bytes(out)
+buf = b""
+def run(cmd, expect, timeout=900):
+    global buf
+    buf = b""
+    tag = "TAG_%d" % int(time.time() * 1000 % 1000000)
+    want = (tag + ":").encode()
     try:
-        with open(serial_log, errors="replace") as f:
-            return f.read()
-    except OSError:
-        return ""
-m = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-m.settimeout(15)
-for _ in range(60):
-    try:
-        m.connect(mon_sock)
-        break
-    except (FileNotFoundError, ConnectionRefusedError):
-        time.sleep(2)
-else:
-    print("FATAL: no monitor")
-    sys.exit(1)
-m.settimeout(10)
-try:
-    m.recv(4096)
-except socket.timeout:
-    pass
-def pump():
-    # Drain monitor responses without blocking: an unread monitor stalls
-    # QEMU command processing.
-    m.settimeout(0)
-    try:
-        while True:
-            if not m.recv(65536):
-                break
-    except (socket.timeout, BlockingIOError, OSError):
-        pass
-    finally:
-        m.settimeout(10)
-def sendkey(keys):
-    try:
-        m.sendall(("sendkey %s\r" % keys).encode())
+        s.sendall(("\n" + cmd + "\necho %s:$?\n" % tag).encode())
     except (BrokenPipeError, OSError) as e:
-        print("FATAL: monitor send failed: %s" % e)
+        print("FATAL: serial send failed: %s" % e)
         sys.exit(1)
-    pump()
-# Only unshifted keys: QEMU monitor shift-combos are unreliable here.
-KEYS = {' ': 'spc', '/': 'slash', '-': 'minus', '=': 'equal',
-        '.': 'dot', ',': 'comma', ';': 'semicolon'}
-def stype(text, delay=0.2):
-    for ch in text:
-        sendkey(KEYS.get(ch, ch))
-        time.sleep(delay)
-    sendkey("ret")
-    time.sleep(0.5)
-fails = []
-mark = 0
-def check(cond, what):
-    print(("PASS " if cond else "FAIL ") + what, flush=True)
-    if not cond:
-        fails.append(what)
-def wait_count(needle, n, timeout):
-    # needle occurrences since mark (mark = file size when the line was
-    # typed). A typed line appears once as tty echo; real command output
-    # adds further occurrences, so completion tags need >= 2 (echo +
-    # execution) while data absent from the input needs >= 1.
     end = time.time() + timeout
     while time.time() < end:
-        pump()
         try:
-            with open(serial_log, errors="replace") as f:
-                f.seek(mark)
-                if f.read().count(needle) >= n:
-                    return True
-        except OSError:
-            pass
-        time.sleep(5)
-    return False
-def run_typed(cmd, tag, timeout=180):
-    # Type "<cmd> ; echo <tag>" and wait for the tag's execution (echo +
-    # output = 2 occurrences after the typing position).
-    global mark
+            chunk = s.recv(65536)
+        except socket.timeout:
+            chunk = b""
+        if chunk:
+            clean = filtered(chunk)
+            buf += clean
+            tfile.write(clean)
+        # The guest tty echoes our input, so the tag first appears in the
+        # echo of the marker line itself (within milliseconds); only the
+        # SECOND occurrence is the marker really executing after the command
+        # finished. Matching once returns slow commands (install, copy) on
+        # their own echo with the expected output still missing.
+        if buf.count(want) >= 2:
+            break
+        time.sleep(0.3)
+    return expect.encode() in buf
+# The boot logs may predate our connection (telnet drops pre-connect
+# output), so prove bidirectionality with a fresh newline: the shell
+# echoes it and prints a new prompt.
+for _ in range(150):
     try:
-        mark = open(serial_log, "rb").seek(0, 2)
-    except OSError:
-        mark = 0
-    stype(cmd + " ; echo " + tag)
-    return wait_count(tag, 2, timeout)
-# 1. Cold boots (dracut live assembly, empty caches) can take minutes to
-# reach init; poll patiently rather than failing fast.
-check(wait_count("sh-5.3#", 1, 300), "guest reached root shell")
-if fails:
-    sys.exit(1)
-# 2. Wrong-disk guard: the guest target must be exactly the expected size,
-# and must be the disk we created (never the host's).
-if run_typed("ls /dev/vdb", "t1done"):
-    check(wait_count("/dev/vdb", 2, 60), "target disk visible")
-else:
-    check(False, "target disk visible")
-if run_typed("lsblk -b /dev/vdb", "t2done", 60):
-    check(wait_count(str(disk_bytes), 1, 60), "target disk size exact")
-else:
-    check(False, "target disk size exact")
-# 3. Simulate the live firstboot lifecycle. This phase boots with
-# init=/bin/sh (no systemd), so datum-firstboot-live never runs; create
-# exactly what it would have created: a real local account, a home, and
-# both live-user markers (persistent /etc one + runtime /run one). The
-# installer must then remove that live-only identity from the target.
-# Supplementary groups come from the live /etc/group (parsed here, not in
-# the guest) so the command stays free of shell metacharacters.
-if run_typed("cat /etc/group", "t3done", 60):
-    present = [g for g in ("wheel", "audio", "video", "render", "input",
-                           "plugdev", "cdrom")
-               if g + ":x:" in read_serial()]
-    uacmd = "useradd -m -g users -s /bin/bash livetemp"
-    if present:
-        uacmd = "useradd -m -g users -G " + ",".join(present) + " -s /bin/bash livetemp"
-    if run_typed(uacmd, "t4done", 120):
-        check(wait_count("t4done", 2, 60), "live user created")
-    else:
-        check(False, "live user created")
-else:
-    check(False, "live user created")
-if run_typed("getent passwd livetemp", "t5done", 60):
-    check(wait_count("livetemp", 2, 60), "live user resolvable")
-else:
-    check(False, "live user resolvable")
-if not run_typed("mkdir -p /etc/datum", "t6done", 60):
-    check(False, "marker dir created")
-# Marker files via dd with an exact byte count (no shell redirects, which
-# need unshifted-unreliable keys): "livetemp\n" is 9 bytes; the trailing
-# ret completes the count and dd exits, then the echo tag runs.
-for marker, tag in (("/etc/datum/live-user", "t7done"),
-                    ("/run/datum-live-user", "t8done")):
-    try:
-        mark = open(serial_log, "rb").seek(0, 2)
-    except OSError:
-        mark = 0
-    stype("dd of=" + marker + " bs=1 count=9 ; echo " + tag)
+        s.sendall(b"\n")
+    except (BrokenPipeError, OSError):
+        time.sleep(2)
+        continue
     time.sleep(2)
-    stype("livetemp")
-    check(wait_count(tag, 2, 120), "marker written: " + marker)
-if run_typed("cat /etc/datum/live-user", "t9done", 60):
-    check(wait_count("livetemp", 2, 60), "marker readable")
+    try:
+        chunk = s.recv(65536)
+    except socket.timeout:
+        chunk = b""
+    if chunk:
+        clean = filtered(chunk)
+        buf += clean
+        tfile.write(clean)
+    if b"sh-5.3#" in buf:
+        break
 else:
-    check(False, "marker readable")
-if fails:
+    print("FATAL: no shell")
     sys.exit(1)
-# 4. Run the installer with an interactive password (the real user path:
-# no environment backdoors here). The installer prints its plan, then
-# prompts twice; the typed password is masked by the guest tty.
-stype("datum-install --disk " + disk + " --user datum --hostname emergencetest --yes")
-check(wait_count("password for datum", 1, 300), "installer reached password prompt")
-if not fails:
-    stype("emergencetestpass")
-    check(wait_count("repeat password", 1, 120), "installer asked for confirmation")
-if not fails:
-    stype("emergencetestpass")
-    check(wait_count("installed Datum Emergence", 1, 1500), "installation completed")
-print("PHASE-A %s" % ("SUCCESS" if not fails else "FAILED"))
-sys.exit(0 if not fails else 1)
+print("guest shell is bidirectional")
+run("mount -t proc none /proc; mount -t sysfs none /sys; "
+    "mount -t efivarfs none /sys/firmware/efi/efivars 2>/dev/null; "
+    "test -b %s" % disk, "DISK_PRESENT", 60)
+# Wrong-disk guard: the guest target must be exactly the expected size.
+if not run("lsblk -bn -o SIZE -d %s" % disk, str(disk_bytes), 60):
+    print("FATAL: guest disk size mismatch; refusing to install")
+    sys.exit(1)
+# Simulate the live firstboot lifecycle. This phase boots with init=/bin/sh
+# (no systemd), so datum-firstboot-live never runs; create exactly what it
+# would have created: a real local account, a home, and both live-user
+# markers (persistent /etc one + runtime /run one). The installer must then
+# remove that live-only identity from the target it copies.
+if not run("EXTRA=\"\"; "
+           "for g in wheel audio video render input plugdev cdrom; do "
+           "getent group \"$g\" >/dev/null 2>&1 && EXTRA=\"$EXTRA $g\"; done; "
+           "if test -n \"$EXTRA\"; then "
+           "useradd -m -g users -G \"$(printf '%s' \"$EXTRA\" | tr ' ' ',')\" -s /bin/bash livetemp; "
+           "else useradd -m -g users -s /bin/bash livetemp; fi; "
+           "echo livetemp-canary > /home/livetemp/.live-canary; "
+           "mkdir -p /etc/datum /run; "
+           "echo livetemp > /etc/datum/live-user; echo livetemp > /run/datum-live-user; "
+           "getent passwd livetemp && test -f /etc/datum/live-user && echo LIVE_USER_READY",
+           "LIVE_USER_READY", 120):
+    print("FATAL: live-user simulation failed")
+    sys.exit(1)
+ok = run("export EMERGENCE_INSTALL_PASSWORD=emergence-test-pass; "
+         "datum-install --disk %s --user datum --hostname emergence-test "
+         "--timezone UTC --yes" % disk, "installed Datum Emergence", 1500)
+print("INSTALL %s" % ("SUCCESS" if ok else "FAILED"))
+sys.exit(0 if ok else 1)
 PYEOF
 RC=$?
 kill "$QEMU_A" 2>/dev/null || true

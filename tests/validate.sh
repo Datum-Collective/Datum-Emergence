@@ -89,9 +89,10 @@ grep -q 'DATUM_PROBE end' "$root/scripts/test-iso.sh"
 # Firstboot mode boots its own QEMU; the plain CI boot block is ci-only.
 grep -q 'if test "$MODE" = ci; then' "$root/scripts/test-iso.sh"
 grep -q 'Simulate the live firstboot lifecycle' "$root/scripts/test-install.sh"
-# Phase A uses file serial (unix serial delivered zero bytes here) plus
-# monitor typing with unshifted keys only and per-command echo tags.
-grep -q 'semicolon' "$root/scripts/test-install.sh"
+# Phase A uses a TCP serial console (unix serial delivered zero bytes here;
+# monitor sendkey cannot reach a serial shell) with telnet filtering and
+# echo-safe completion tags.
+grep -q 'telnet:127.0.0.1' "$root/scripts/test-install.sh"
 grep -q 'installed Datum Emergence' "$root/scripts/test-install.sh"
 grep -q 'loop,ro,offset' "$root/scripts/test-install.sh"
 ! grep -q 'unix:$SOCK' "$root/scripts/test-install.sh"
