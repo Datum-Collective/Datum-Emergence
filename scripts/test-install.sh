@@ -98,6 +98,7 @@ def run(cmd, expect, timeout=900):
     global buf
     buf = b""
     tag = "TAG_%d" % int(time.time() * 1000 % 1000000)
+    want = (tag + ":").encode()
     s.sendall(("\n" + cmd + "\necho %s:$?\n" % tag).encode())
     end = time.time() + timeout
     while time.time() < end:
@@ -109,7 +110,12 @@ def run(cmd, expect, timeout=900):
             buf += chunk
             tfile.write(chunk)
             tfile.flush()
-        if (tag + ":").encode() in buf:
+        # The guest tty echoes our input, so the tag first appears in the
+        # echo of the marker line itself (within milliseconds); only the
+        # SECOND occurrence is the marker really executing after the command
+        # finished. Matching once returns slow commands (install, copy) on
+        # their own echo with the expected output still missing.
+        if buf.count(want) >= 2:
             break
         time.sleep(0.3)
     return expect.encode() in buf
