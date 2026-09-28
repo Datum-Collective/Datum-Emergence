@@ -13,7 +13,6 @@ livecd/iso: @ISO_PATH@
 livecd/root_overlay: @ROOT_OVERLAY@
 livecd/fsscript: @PROJECT_ROOT@/catalyst/livecd-fsscript.sh
 livecd/type: generic-livecd
-livecd/users: emergence
 livecd/volid: DATUM_EMERGENCE_AMD64
 livecd/motd: @PROJECT_ROOT@/catalyst/motd
 livecd/rm: /usr/src

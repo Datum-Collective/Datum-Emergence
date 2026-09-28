@@ -26,7 +26,7 @@ emit "begin $(date -u +%FT%TZ) $(cat /proc/cmdline 2>/dev/null)"
 # System state.
 if command -v systemctl >/dev/null 2>&1; then
   emit "system=$(systemctl is-system-running 2>/dev/null || echo unknown)"
-  for svc in NetworkManager.service greetd.service datum-firstboot.service; do
+  for svc in NetworkManager.service greetd.service datum-firstboot-live.service; do
     if systemctl list-unit-files "$svc" >/dev/null 2>&1; then
       emit "service.$svc=$(systemctl is-active $svc 2>/dev/null || echo unknown)"
     fi
@@ -40,29 +40,50 @@ else
   emit "live-media=absent(installed?)"
 fi
 
-# Wait for the autologin session (greetd starts it a few seconds after boot).
-# The live session runs as 'emergence', an installed session as the first
-# local user, so detect whoever is actually logged in.
+# Session detection. On live media the firstboot setup records the username
+# it created in /run/datum-live-user; that file is authoritative (never guess
+# system accounts). On installed systems there is no state file, so detect
+# logged-in human users (uid >= 1000) instead. Never hardcode a username.
 SESSION_USER=""
-for i in $(seq 1 30); do
-  for u in emergence datum; do
-    if loginctl show-user "$u" >/dev/null 2>&1; then
-      SESSION_USER=$u
-      break 2
+EXPECTED_USER=""
+if test -f /run/datum-live-user; then
+  EXPECTED_USER=$(cat /run/datum-live-user 2>/dev/null | tr -d '[:space:]')
+fi
+if test -n "$EXPECTED_USER"; then
+  emit "firstboot.status=complete(user=$EXPECTED_USER)"
+  # The tuigreet login is typed by a human (or the test harness) after the
+  # probe already started; allow a generous window for it.
+  for i in $(seq 1 45); do
+    if loginctl show-user "$EXPECTED_USER" >/dev/null 2>&1; then
+      SESSION_USER=$EXPECTED_USER
+      break
     fi
+    sleep 2
   done
-  sleep 2
-done
+elif test -e /dev/disk/by-label/DATUM_EMERGENCE_AMD64; then
+  # Live boot with no configured user (yet): firstboot has not finished.
+  emit "firstboot.status=incomplete"
+else
+  # Installed system: the permanent user autologs in through greetd's
+  # initial_session, but session registration takes seconds; poll like above
+  # instead of racing it.
+  for i in $(seq 1 30); do
+    for u in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
+      uid=$(id -u "$u" 2>/dev/null || echo 0)
+      if test "$uid" -ge 1000 2>/dev/null; then
+        if loginctl show-user "$u" >/dev/null 2>&1; then
+          SESSION_USER=$u
+          break 2
+        fi
+      fi
+    done
+    sleep 2
+  done
+fi
 if test -n "$SESSION_USER"; then
   emit "user.session=yes($SESSION_USER)"
 else
   emit "user.session=no"
-fi
-# Backwards-compatible live keys (empty on installed systems by design).
-if loginctl show-user emergence >/dev/null 2>&1; then
-  emit "user.emergence.session=yes"
-else
-  emit "user.emergence.session=no"
 fi
 
 HYPRLAND=no
@@ -75,7 +96,7 @@ if test -n "$SESSION_USER"; then
     if pgrep -u "$SESSION_USER" -x Hyprland >/dev/null 2>&1; then
       HYPRLAND=yes
     fi
-    # Any UID's runtime dir (live emergence is 1000, installed users differ).
+    # Any UID's runtime dir (live and installed UIDs differ per setup).
     for rtdir in /run/user/*; do
       for sock in "$rtdir"/wayland-* "$rtdir"/hypr/*/.hyprland.sock "$rtdir"/hypr/*/hyprland.sock; do
         if test -S "$sock" 2>/dev/null || test -e "$sock" 2>/dev/null; then
@@ -92,9 +113,6 @@ if test -n "$SESSION_USER"; then
 fi
 emit "user.session.hyprland=$HYPRLAND"
 emit "user.session.wayland-socket=$WAYLAND_SOCK"
-if test "$SESSION_USER" = emergence; then
-  emit "user.emergence.hyprland=$HYPRLAND"
-fi
 # Compositor helpers: are they alive, and what did they log?
 if test -n "$SESSION_USER"; then
   for app in hyprpaper waybar dunst wofi kitty Hyprland; do
@@ -161,10 +179,18 @@ else
   else
     emit "installer.removable-bootloader=MISSING"
   fi
-  if getent passwd emergence >/dev/null 2>&1; then
-    emit "installer.live-user-removed=no(STILL PRESENT)"
-  else
+  # No live-firstboot state may survive into an installed system: the
+  # installer removes the live-only account from the target synchronously and
+  # deletes the /etc/datum/live-user marker (a lingering marker means the
+  # live identity leaked into the installation). A healthy installed boot
+  # therefore has no marker and a real human session (the autologged-in
+  # permanent user).
+  if test -e /etc/datum/live-user; then
+    emit "installer.live-user-removed=no(MARKER PRESENT)"
+  elif test -n "$SESSION_USER"; then
     emit "installer.live-user-removed=yes"
+  else
+    emit "installer.live-user-removed=no(NO SESSION)"
   fi
 fi
 # First local user: the account the current graphical session runs as, if any.

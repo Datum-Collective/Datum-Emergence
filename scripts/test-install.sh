@@ -144,10 +144,50 @@ run("mount -t proc none /proc; mount -t sysfs none /sys; "
 if not run("lsblk -bn -o SIZE -d %s" % disk, str(disk_bytes), 60):
     print("FATAL: guest disk size mismatch; refusing to install")
     sys.exit(1)
+# Simulate the live firstboot lifecycle. This phase boots with init=/bin/sh
+# (no systemd), so datum-firstboot-live never runs; create exactly what it
+# would have created: a real local account, a home, and both live-user
+# markers (persistent /etc one + runtime /run one). The installer must then
+# remove that live-only identity from the target it copies.
+if not run("EXTRA=\"\"; "
+           "for g in wheel audio video render input plugdev cdrom; do "
+           "getent group \"$g\" >/dev/null 2>&1 && EXTRA=\"$EXTRA $g\"; done; "
+           "if test -n \"$EXTRA\"; then "
+           "useradd -m -g users -G \"$(printf '%s' \"$EXTRA\" | tr ' ' ',')\" -s /bin/bash livetemp; "
+           "else useradd -m -g users -s /bin/bash livetemp; fi; "
+           "echo livetemp-canary > /home/livetemp/.live-canary; "
+           "mkdir -p /etc/datum /run; "
+           "echo livetemp > /etc/datum/live-user; echo livetemp > /run/datum-live-user; "
+           "getent passwd livetemp && test -f /etc/datum/live-user && echo LIVE_USER_READY",
+           "LIVE_USER_READY", 60):
+    print("FATAL: live-user simulation failed")
+    sys.exit(1)
 ok = run("export EMERGENCE_INSTALL_PASSWORD=emergence-test-pass; "
          "datum-install --disk %s --user datum --hostname emergence-test "
          "--timezone UTC --yes" % disk, "installed Datum Emergence", 1200)
 print("INSTALL %s" % ("SUCCESS" if ok else "FAILED"))
+if not ok:
+    sys.exit(1)
+# Verify the target directly (still in the root shell, installer unmounted):
+# the live-only account and its marker must be gone, the permanent user and
+# its installed autologin must exist, and no live-firstboot files may linger.
+ok = run("mkdir -p /mnt/verify; mount %s2 /mnt/verify && echo MOUNTED" % disk,
+         "MOUNTED", 120)
+if ok:
+    ok = run("test ! -e /mnt/verify/etc/datum/live-user && "
+             "! grep -q '^livetest:' /mnt/verify/etc/passwd && "
+             "! grep -q '^livetest:' /mnt/verify/etc/shadow && "
+             "! grep -q 'livetest' /mnt/verify/etc/group && "
+             "test ! -e /mnt/verify/home/livetest && "
+             "grep -q '^datum:' /mnt/verify/etc/passwd && "
+             "grep -q 'initial_session' /mnt/verify/etc/greetd/config.toml && "
+             "grep -q 'user = \"datum\"' /mnt/verify/etc/greetd/config.toml && "
+             "test ! -e /mnt/verify/etc/systemd/system/datum-firstboot-live.service && "
+             "test ! -e /mnt/verify/usr/local/bin/datum-firstboot-live && "
+             "test ! -e /mnt/verify/etc/systemd/system/datum-firstboot.service && "
+             "umount /mnt/verify && echo TARGET_VERIFY_OK",
+             "TARGET_VERIFY_OK", 120)
+print("TARGET-VERIFY %s" % ("SUCCESS" if ok else "FAILED"))
 sys.exit(0 if ok else 1)
 PYEOF
 RC=$?

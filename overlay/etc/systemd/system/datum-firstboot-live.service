@@ -1,0 +1,22 @@
+[Unit]
+Description=Datum Emergence live first-boot user setup
+# Takes over tty1 from getty so the setup prompt is visible, then hands the
+# VT to greetd (which also conflicts with getty@tty1 itself).
+After=getty@tty1.service
+Conflicts=getty@tty1.service
+# Documents intent; greetd is not enabled in the live image, firstboot starts
+# it imperatively once a valid account exists.
+Before=greetd.service
+
+[Service]
+Type=oneshot
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+ExecStart=/usr/local/bin/datum-firstboot-live
+
+[Install]
+WantedBy=multi-user.target

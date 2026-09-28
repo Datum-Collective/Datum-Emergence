@@ -1,9 +1,9 @@
+# No initial_session: the live user is created interactively by
+# datum-firstboot-live before greetd starts, then logs in here with a
+# password like on any normal system. A hardcoded autologin account would
+# leave no usable credential path if it ever failed.
 [terminal]
 vt = 1
-
-[initial_session]
-command = "dbus-run-session /usr/local/bin/start-datum"
-user = "emergence"
 
 [default_session]
 command = "tuigreet --greeting 'Datum Emergence' --cmd 'dbus-run-session /usr/local/bin/start-datum'"

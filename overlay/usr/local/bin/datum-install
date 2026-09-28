@@ -7,8 +7,10 @@
 #
 # The installer partitions the target with a GPT (512M EFI System Partition
 # + root), copies the live system with tar, writes fstab, installs GRUB for
-# UEFI (including the removable fallback), creates the first local user, and
-# removes live-only identity. The target disk is fully overwritten.
+# UEFI (including the removable fallback), removes the live-only account the
+# firstboot setup created (it was copied over with the filesystem), creates
+# the permanent first local user, and removes live-only identity. The target
+# disk is fully overwritten.
 #
 # Password: prompted twice on the terminal, or taken from
 # EMERGENCE_INSTALL_PASSWORD (used by automated VM installs).
@@ -28,7 +30,7 @@ usage() {
 usage: $PROG --disk DEVICE [--hostname NAME] [--user NAME] [--timezone ZONE] [--yes] [--reboot]
   --disk      target block device (e.g. /dev/vda). ALL DATA ON IT IS DESTROYED.
   --hostname  installed hostname (default: emergence)
-  --user      first local user (default: datum; must differ from live 'emergence')
+  --user      permanent first local user (default: datum)
   --timezone  e.g. UTC, Europe/Berlin (default: UTC)
   --yes       confirm the destructive operation (also prints the plan first)
   --reboot    reboot when finished
@@ -67,7 +69,7 @@ case "$HOSTNAME" in
   *[!a-zA-Z0-9-]*|"") die "invalid hostname: $HOSTNAME" ;;
 esac
 case "$NEWUSER" in
-  ""|root|emergence|greeter|*[^a-z0-9_-]*|-[a-z0-9_-]*|[0-9]*) die "invalid username: $NEWUSER (must not be root/emergence/greeter)" ;;
+  ""|root|emergence|greeter|greetd|*[^a-z0-9_-]*|-[a-z0-9_-]*|[0-9]*) die "invalid username: $NEWUSER (must not be root/emergence/greeter/greetd)" ;;
 esac
 test -f "/usr/share/zoneinfo/$TIMEZONE" || die "unknown timezone: $TIMEZONE"
 test -b "$DISK" || die "not a block device: $DISK"
@@ -99,7 +101,7 @@ info "plan:"
 info "  disk:     $DISK (${DISK_MIB}MiB) -- ALL DATA WILL BE DESTROYED"
 info "  layout:   GPT: p1 ${ESP_SIZE_MIB}MiB ESP (FAT32), p2 rest root (ext4)"
 info "  hostname: $HOSTNAME"
-info "  user:     $NEWUSER (live 'emergence' account is removed)"
+info "  user:     $NEWUSER (any live-session account is removed from the target)"
 info "  timezone: $TIMEZONE"
 info "  boot:     GRUB x86_64-efi (NVRAM entry + removable fallback)"
 lsblk "$DISK" >&2 || true
@@ -211,50 +213,97 @@ EOF
 # Fresh machine identity (never carry the live session's over).
 rm -f "$MNT/etc/machine-id" "$MNT/var/lib/dbus/machine-id"
 target "systemd-machine-id-setup"
-# The live 'emergence' account cannot be deleted here: its session owns the
-# processes we run from. A one-shot first-boot service removes it on the
-# installed system (where it has no processes) and then removes itself.
-mkdir -p "$MNT/usr/local/sbin"
-cat > "$MNT/usr/local/sbin/datum-firstboot" <<'FIRSTBOOT_EOF'
-#!/bin/sh
-# One-shot: remove the live-session account inherited from the ISO image.
-set -eu
-if getent passwd emergence >/dev/null 2>&1; then
-  loginctl terminate-user emergence 2>/dev/null || true
-  sleep 2
-  userdel -r emergence 2>/dev/null || userdel emergence 2>/dev/null || {
-    passwd -l emergence
-    usermod -s /sbin/nologin -e 1 emergence
-  }
+# Live-only account cleanup. Booting the live ISO runs datum-firstboot-live,
+# which creates the account the user chose and records it in
+# /etc/datum/live-user (persistent, so it is copied onto the target by the
+# tar step above) and /run/datum-live-user (runtime only). That account must
+# not survive on the target: the installed system gets exactly one permanent
+# user, created below.
+#
+# userdel cannot do this removal: the live session currently runs as that
+# UID, so userdel would refuse (and it could touch the live account DBs
+# instead of the target's). The target databases are plain text and no live
+# process depends on the target copies, so edit them directly.
+LIVE_USER=""
+for marker in /etc/datum/live-user /run/datum-live-user; do
+  if test -f "$marker"; then
+    u=$(tr -d '[:space:]' < "$marker" 2>/dev/null || true)
+    if test -n "$u"; then
+      if test -z "$LIVE_USER"; then
+        LIVE_USER=$u
+      elif test "$u" != "$LIVE_USER"; then
+        die "conflicting live-user markers: '$LIVE_USER' vs '$u' in $marker"
+      fi
+    fi
+  fi
+done
+case "$LIVE_USER" in
+  ""|root|emergence|greeter|greetd|*[^a-z0-9_-]*|-[a-z0-9_-]*|[0-9]*)
+    if test -n "$LIVE_USER"; then
+      die "live-user marker names an unusable account: '$LIVE_USER'"
+    fi ;;
+esac
+if test -n "$LIVE_USER" && test "$LIVE_USER" != "$NEWUSER"; then
+  info "removing live-only user '$LIVE_USER' from target ..."
+  for f in passwd shadow gshadow; do
+    if test -f "$MNT/etc/$f"; then
+      grep -v "^$LIVE_USER:" "$MNT/etc/$f" > "$MNT/etc/$f.tmp" || true
+      cat "$MNT/etc/$f.tmp" > "$MNT/etc/$f"
+      rm -f "$MNT/etc/$f.tmp"
+    fi
+  done
+  if test -f "$MNT/etc/group"; then
+    # Strip the user from supplementary member lists, then drop a group
+    # literally named after the user if left memberless. The shared primary
+    # group (users) is untouched. (Marker names match [a-z0-9_-]; GNU \b.)
+    sed -i -e "s/\b$LIVE_USER\b//g" -e 's/,,*/,/g' -e 's/:,/:/' -e 's/,$//' "$MNT/etc/group"
+    sed -i "/^$LIVE_USER:[^:]*:[0-9][0-9]*:$/d" "$MNT/etc/group"
+  fi
+  rm -rf "$MNT/home/$LIVE_USER" "$MNT/var/mail/$LIVE_USER" "$MNT/var/spool/mail/$LIVE_USER"
+elif test -n "$LIVE_USER"; then
+  info "live user '$LIVE_USER' matches the requested installed user; adopting the account ..."
 fi
-systemctl disable datum-firstboot.service
-rm -f /etc/systemd/system/datum-firstboot.service /usr/local/sbin/datum-firstboot
-systemctl daemon-reload
-FIRSTBOOT_EOF
-chmod 755 "$MNT/usr/local/sbin/datum-firstboot"
-cat > "$MNT/etc/systemd/system/datum-firstboot.service" <<'SERVICE_EOF'
-[Unit]
-Description=Datum one-shot live-account cleanup
-After=network-pre.target
-Before=greetd.service
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/datum-firstboot
-[Install]
-WantedBy=multi-user.target
-SERVICE_EOF
-target "systemctl enable datum-firstboot.service"
+# The marker is live-only state and must never survive into the installed system.
+rm -f "$MNT/etc/datum/live-user"
+rmdir "$MNT/etc/datum" 2>/dev/null || true
+# The image ships no preset human accounts, so any remaining UID >= 1000
+# entry on the target (other than the requested user) is unexpected live
+# state: refuse to guess instead of silently inheriting it. (65534/nobody
+# is not a human account.)
+STRAY_USERS=$(awk -F: '$3 >= 1000 && $3 != 65534 {print $1}' "$MNT/etc/passwd" 2>/dev/null || true)
+for stray in $STRAY_USERS; do
+  if test "$stray" != "$NEWUSER"; then
+    die "unexpected UID>=1000 account '$stray' on target (live state?); refusing to inherit it"
+  fi
+done
 for g in wheel users audio video render input plugdev; do
   target "getent group $g >/dev/null || groupadd -r $g"
 done
-target "useradd -m -s /bin/bash -G wheel,users,audio,video,render,input,plugdev $NEWUSER"
+if target "id $NEWUSER >/dev/null 2>&1"; then
+  # Only the adopted live account may already exist here (anything else died
+  # in the stray check above). Keep its home, fix groups/shell/ownership,
+  # and set the installed password below.
+  info "using existing '$NEWUSER' account from live session ..."
+  target "usermod -s /bin/bash -g users -G wheel,users,audio,video,render,input,plugdev $NEWUSER"
+  target "chown -R $NEWUSER:users /home/$NEWUSER"
+else
+  target "useradd -m -s /bin/bash -G wheel,users,audio,video,render,input,plugdev $NEWUSER"
+fi
 printf '%s:%s\n' "$NEWUSER" "$NEW_PASSWORD" | target "chpasswd"
 NEW_PASSWORD=x; unset NEW_PASSWORD
 target "passwd -l root || true"
-# The live session autologs the live user; point it at the installed user.
-if grep -q '^user = "emergence"' "$MNT/etc/greetd/config.toml"; then
-  sed -i 's/^user = "emergence"$/user = "'"$NEWUSER"'"/' "$MNT/etc/greetd/config.toml"
+# Installed systems autologin the permanent user: the live image carries no
+# [initial_session] (firstboot creates the account before greetd starts), so
+# append one for the installed user. tuigreet stays as the fallback greeter.
+if grep -q 'initial_session' "$MNT/etc/greetd/config.toml"; then
+  die "unexpected initial_session in target greetd config"
 fi
+cat >> "$MNT/etc/greetd/config.toml" <<EOF
+
+[initial_session]
+command = "dbus-run-session /usr/local/bin/start-datum"
+user = "$NEWUSER"
+EOF
 # Timezone.
 ln -sf "/usr/share/zoneinfo/$TIMEZONE" "$MNT/etc/localtime"
 
@@ -279,8 +328,14 @@ if grep -Eq "^[[:space:]]*linux[[:space:]]" "$MNT/boot/grub/grub.cfg"; then
 fi
 
 # Installed system keeps the intended services (symlinks were copied over,
-# but re-enable to be certain they resolve on the target).
+# but re-enable to be certain they resolve on the target). The live
+# first-boot wizard must never run here: the installer created the permanent
+# user instead, so its unit and script are removed from the target outright
+# (disabling alone would leave live-only files behind).
 target "systemctl enable NetworkManager.service greetd.service"
+target "systemctl disable datum-firstboot-live.service"
+rm -f "$MNT/etc/systemd/system/datum-firstboot-live.service" \
+  "$MNT/usr/local/bin/datum-firstboot-live"
 
 info "unmounting ..."
 trap - EXIT INT TERM

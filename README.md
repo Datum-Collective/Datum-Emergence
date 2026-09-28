@@ -35,16 +35,19 @@ sudo dd if=emergence-amd64.iso of=/dev/sdX bs=4M status=progress oflag=sync
 ```
 
 Or use Fedora Media Writer, Balena Etcher, or Ventoy. Then boot the machine
-from USB and run the installer from the live desktop (see Install below).
+from USB: the first-boot setup asks for a username and password for the
+live session, after which you log in and reach the Hyprland desktop. Run
+the installer from the live desktop (see Install below).
 
 ## Status
 
 The repository builds a Catalyst `livecd-stage1`/`livecd-stage2` pipeline
-from a clean Gentoo stage3, ships a UEFI-bootable live ISO with an
-autologin Hyprland session, and installs to disk with the included
-`datum-install` tool. The full chain (clean inputs, stage1, ISO, QEMU UEFI
-boot, live desktop, install to a blank virtual disk, boot of the installed
-system) has been tested end-to-end.
+from a clean Gentoo stage3, ships a UEFI-bootable live ISO with a
+first-boot user setup (you choose the live username and password, then log
+in through greetd/tuigreet into Hyprland), and installs to disk with the
+included `datum-install` tool. The full chain (clean inputs, stage1, ISO,
+QEMU UEFI boot, firstboot setup, live desktop, install to a blank virtual
+disk, boot of the installed system) has been tested end-to-end.
 
 The build is traceable rather than bit-for-bit reproducible: Gentoo rolling
 inputs are recorded in `dist/emergence-build-info.txt`. Supply a fixed stage3
@@ -174,10 +177,19 @@ Automated boot check (headless QEMU/KVM, UEFI, serial console, ~7 minutes):
 ./build.sh test-ci
 ```
 
-It asserts systemd booted, NetworkManager and greetd are active, the live
-user session with Hyprland exists, and the Datum overlay files are present.
-A VNC/screenshot run additionally confirmed the rendered desktop (Waybar,
-cursor, no config errors).
+It drives the real firstboot lifecycle (username/password setup, tuigreet
+login) and asserts systemd booted, NetworkManager and greetd are active,
+the chosen live user session with Hyprland exists, and the Datum overlay
+files are present. A VNC/screenshot run additionally confirmed the rendered
+desktop (Waybar, cursor, no config errors).
+
+Firstboot edge cases (invalid usernames, password confirmation, password
+secrecy on the console) are covered separately:
+
+```sh
+./build.sh test-firstboot        # all scenarios (direct-kernel, serial console)
+./build.sh test-firstboot passwords
+```
 
 Attach the ISO via virtio in VMs: the dist kernel does not enumerate QEMU's
 legacy IDE CD-ROM in this configuration, while virtio-blk works.
@@ -202,11 +214,15 @@ sudo datum-install --disk /dev/vdX --user datum --hostname emergence --yes
 ```
 
 This creates a 512 MiB EFI System Partition plus an ext4 root, copies the
-live system, writes UUID-based fstab, installs GRUB for UEFI (NVRAM entry
-plus the removable `BOOTX64.EFI` fallback), creates the first local user,
-sets the hostname/timezone, regenerates the machine ID, and schedules a
-one-shot first-boot service that removes the live `emergence` account.
-Remove the ISO and boot the installed disk.
+live system, removes the live-session account from the copy (the account
+the firstboot setup created is live-only; the installer refuses to inherit
+any unexpected account), writes UUID-based fstab, installs GRUB for UEFI
+(NVRAM entry plus the removable `BOOTX64.EFI` fallback), creates the
+permanent first local user (which the installed system autologs in),
+sets the hostname/timezone, regenerates the machine ID, and strips all
+live-firstboot state from the target. If the requested installed username
+matches the live-session name, that account is adopted (password and groups
+reset). Remove the ISO and boot the installed disk.
 
 Fully automated VM test (blank 20 GiB disk, install, reboot from disk,
 verify services/session/desktop/fstab/bootloader/live-user removal):

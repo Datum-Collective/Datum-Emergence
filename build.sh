@@ -174,7 +174,12 @@ build_info() {
 }
 
 test_iso() { "$root/scripts/test-iso.sh" "$dist/emergence-amd64.iso"; }
-test_ci() { "$root/scripts/test-iso.sh" --ci "$work/boot-serial.log" --wait "${EMERGENCE_BOOT_WAIT:-420}" "$dist/emergence-amd64.iso"; }
+# The live ISO has no usable account until the firstboot setup creates one,
+# so a bare boot can never reach a desktop: CI drives the real lifecycle
+# (firstboot typing, tuigreet login, desktop) through the actual GRUB boot
+# path. Test credentials live only in this invocation, never in the image.
+test_ci() { "$root/scripts/test-iso.sh" --firstboot "citest:citest123" --wait "${EMERGENCE_BOOT_WAIT:-900}" "$dist/emergence-amd64.iso"; }
+test_firstboot() { "$root/scripts/test-firstboot-checks.sh" --scenario "${1:-all}" "$dist/emergence-amd64.iso"; }
 test_install() { "$root/scripts/test-install.sh" --iso "$dist/emergence-amd64.iso"; }
 
 clean() {
@@ -189,8 +194,9 @@ case ${1:-help} in
   iso) iso ;;
   test) test_iso ;;
   test-ci) test_ci ;;
+  test-firstboot) test_firstboot "${2:-all}" ;;
   test-install) test_install ;;
   all) configure; prepare_catalyst; run_stage; mkdir -p "$dist"; guard_stage2_resume; catalyst -c "$work/generated/catalyst.conf" -f "$work/generated/stage2.spec"; validate_iso; build_info ;;
   clean) clean "${2:-}" ;;
-  *) printf '%s\n' 'usage: ./build.sh {audit|configure|stage|iso|test|test-ci|test-install|all|clean --yes}' >&2; exit 2 ;;
+  *) printf '%s\n' 'usage: ./build.sh {audit|configure|stage|iso|test|test-ci|test-firstboot [scenario]|test-install|all|clean --yes}' >&2; exit 2 ;;
 esac
