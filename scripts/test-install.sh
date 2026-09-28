@@ -77,10 +77,16 @@ qemu-system-x86_64 -m 4096 -smp 4 -accel "$accel" -cpu "$cpu" \
   -display none -serial "unix:$SOCK,server,nowait" -monitor none &
 QEMU_A=$!
 TRANSCRIPT="$WORKDIR/install-serial.log"
-python3 - "$SOCK" "$GUEST_DISK" "$GUEST_DISK_BYTES" "$TRANSCRIPT" <<'PYEOF'
+# A second, unbuffered transcript in the invoking directory: the WORKDIR copy
+# is removed by the exit trap, so a host-side failure between the driver and
+# the verdict must never be able to take the guest evidence with it.
+OUTSIDE_TRANSCRIPT="$PWD/emergence-install-serial-live.log"
+rm -f "$OUTSIDE_TRANSCRIPT"
+python3 - "$SOCK" "$GUEST_DISK" "$GUEST_DISK_BYTES" "$TRANSCRIPT" "$OUTSIDE_TRANSCRIPT" <<'PYEOF'
 import socket, sys, time
-sock, disk, disk_bytes, transcript = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4]
+sock, disk, disk_bytes, transcript, outside = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
 tfile = open(transcript, "wb")
+tfile2 = open(outside, "wb", buffering=0)
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 s.settimeout(10)
 for _ in range(60):
@@ -110,6 +116,7 @@ def run(cmd, expect, timeout=900):
             buf += chunk
             tfile.write(chunk)
             tfile.flush()
+            tfile2.write(chunk)
         # The guest tty echoes our input, so the tag first appears in the
         # echo of the marker line itself (within milliseconds); only the
         # SECOND occurrence is the marker really executing after the command
@@ -133,13 +140,14 @@ for _ in range(150):
         chunk = s.recv(65536)
     except socket.timeout:
         chunk = b""
-    if chunk:
-        buf += chunk
-        tfile.write(chunk)
-        tfile.flush()
-    if b"SYNC_READY" in buf:
-        synced = True
-        break
+        if chunk:
+            buf += chunk
+            tfile.write(chunk)
+            tfile.flush()
+            tfile2.write(chunk)
+        if b"SYNC_READY" in buf:
+            synced = True
+            break
 if not synced:
     print("FATAL: no shell");
     sys.exit(1)

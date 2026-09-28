@@ -92,6 +92,9 @@ grep -q 'TARGET_VERIFY_OK' "$root/scripts/test-install.sh"
 grep -q 'live-user simulation' "$root/scripts/test-install.sh"
 # Serial drivers must not trip on the guest tty echo of their own marker.
 grep -q 'buf.count(want) >= 2' "$root/scripts/test-install.sh"
+# The guest transcript must survive the run in the invoking directory even
+# if the workdir is cleaned before the verdict runs.
+grep -q 'emergence-install-serial-live.log' "$root/scripts/test-install.sh"
 test -f "$root/config/bashrc"
 bash -n "$root/config/bashrc"
 grep -q 'sys-kernel/gentoo-kernel' "$root/config/bashrc"
