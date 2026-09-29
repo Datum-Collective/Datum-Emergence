@@ -16,11 +16,11 @@ administration model.
 
 ## Download
 
-Testing ISO (v0.1.2 prerelease, UEFI x86_64 live + installer):
+Testing ISO (v0.1.3 prerelease, UEFI x86_64 live + installer):
 
 - [emergence-amd64.iso](https://github.com/Datum-Collective/Datum-Emergence/releases/latest/download/emergence-amd64.iso)
-  (2,088,611,840 bytes, SHA256
-  `612815ccc8e28190aa562a6594f45ef8d1825000df7eb09a1ea067c627979d7d`)
+  (2,088,607,744 bytes, SHA256
+  `a96023f3b2468a82929497f3a0a0ee29d6eb8d1e82029150430b69702c87c3ba`)
 
 Verify after downloading (Linux):
 
