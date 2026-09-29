@@ -293,9 +293,11 @@ printf '%s:%s\n' "$NEWUSER" "$NEW_PASSWORD" | target "chpasswd"
 NEW_PASSWORD=x; unset NEW_PASSWORD
 target "passwd -l root || true"
 # Installed systems autologin the permanent user: the live image carries no
-# [initial_session] (firstboot creates the account before greetd starts), so
-# append one for the installed user. tuigreet stays as the fallback greeter.
-if grep -q 'initial_session' "$MNT/etc/greetd/config.toml"; then
+# [initial_session] section (firstboot creates the account before greetd
+# starts), so append one for the installed user. tuigreet stays as the
+# fallback greeter. Match the section header exactly: the live config
+# contains a comment mentioning initial_session.
+if grep -q '^\[initial_session\]' "$MNT/etc/greetd/config.toml"; then
   die "unexpected initial_session in target greetd config"
 fi
 cat >> "$MNT/etc/greetd/config.toml" <<EOF
