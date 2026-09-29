@@ -94,46 +94,64 @@ fi
 
 kmsg "starting user setup"
 
+show_header() {
+  # Monochrome, structured, Datum-branded firstboot screen. No debug output,
+  # no raw shell interaction: just the product, the task, and the prompts.
+  say ""
+  say "  +------------------------------------------------+"
+  say "  |                DATUM  EMERGENCE                |"
+  say "  |                First boot setup                |"
+  say "  +------------------------------------------------+"
+  say ""
+  say "  Create the local account used by the live desktop."
+  say ""
+}
+
+show_error() {
+  # $1 = message. Readable, immediate, recoverable: stay in the loop,
+  # never drop to a shell.
+  say ""
+  say "  ! $1"
+  say "  Please try again."
+  say ""
+}
+
 while true; do
-  say ""
-  say "Datum Emergence"
-  say "First boot setup"
-  say ""
-  say "Create the local account used by the live desktop."
-  say ""
-  NEWUSER=$(prompt "Username: " no)
+  show_header
+  NEWUSER=$(prompt "  Username: " no)
   if ! valid_username "$NEWUSER"; then
     case "$NEWUSER" in
       "") reason="empty username" ;;
       root|emergence|greeter|greetd) reason="reserved username '$NEWUSER'" ;;
       *) reason="invalid username '$NEWUSER' (a-z, 0-9, _ and -; must not start with a digit or -; max $MAX_NAME_LEN chars)" ;;
     esac
-    say "Invalid username ($reason). Please try again."
+    show_error "Invalid username ($reason)."
     kmsg "invalid username rejected"
     continue
   fi
   if getent passwd "$NEWUSER" >/dev/null 2>&1; then
-    say "The name '$NEWUSER' is already taken on this system. Please choose another."
+    show_error "The name '$NEWUSER' is already taken on this system."
     kmsg "username already exists"
     continue
   fi
   kmsg "username accepted: $NEWUSER"
-  NEW_PASSWORD=$(prompt "Password: " yes)
-  NEW_PASSWORD2=$(prompt "Confirm password: " yes)
+  NEW_PASSWORD=$(prompt "  Password: " yes)
+  NEW_PASSWORD2=$(prompt "  Confirm password: " yes)
   if test -z "$NEW_PASSWORD"; then
-    say "Empty password rejected. Please try again."
+    show_error "Empty password rejected."
     kmsg "empty password rejected"
     NEW_PASSWORD=x; NEW_PASSWORD2=x; unset NEW_PASSWORD NEW_PASSWORD2
     continue
   fi
   if test "$NEW_PASSWORD" != "$NEW_PASSWORD2"; then
-    say "Passwords do not match. Please try again."
+    show_error "Passwords do not match."
     kmsg "password mismatch"
     NEW_PASSWORD=x; NEW_PASSWORD2=x; unset NEW_PASSWORD NEW_PASSWORD2
     continue
   fi
   NEW_PASSWORD2=x; unset NEW_PASSWORD2
-  say "Creating user..."
+  say ""
+  say "  Creating user '$NEWUSER' ..."
   kmsg "creating user $NEWUSER"
   # Same desktop group set the live session has always used (primary group
   # users, as before); only groups present in the target are assigned.
@@ -162,9 +180,12 @@ while true; do
     mkdir -p "$(dirname "$PERSISTENT_STATE_FILE")"
     printf '%s\n' "$NEWUSER" > "$PERSISTENT_STATE_FILE"
     chmod 644 "$PERSISTENT_STATE_FILE"
-    say "Setup complete."
     say ""
-    say "Starting Datum Emergence..."
+    say "  +------------------------------------------------+"
+    say "  |  Setup complete. Welcome to Datum Emergence.   |"
+    say "  +------------------------------------------------+"
+    say ""
+    say "  Starting login ..."
     kmsg "setup complete for $NEWUSER"
     trap - INT TERM
     exec 3<&- 2>/dev/null || true
@@ -175,6 +196,6 @@ while true; do
     exit 0
   fi
   NEW_PASSWORD=x; unset NEW_PASSWORD
-  say "User creation failed unexpectedly. Please try again."
+  show_error "User creation failed unexpectedly."
   kmsg "user creation failed"
 done

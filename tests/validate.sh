@@ -68,6 +68,18 @@ grep -q 'datum-live-user' "$root/overlay/usr/local/bin/datum-boot-probe"
 grep -q 'firstboot.status' "$root/overlay/usr/local/bin/datum-boot-probe"
 # Installer keeps installed systems on the permanent-user flow.
 grep -q 'disable datum-firstboot-live' "$root/overlay/usr/local/bin/datum-install"
+# Session launcher must use the Hyprland watchdog (the direct-Hyprland
+# invocation warns "launched without start-hyprland" and loses supervision).
+grep -q 'start-hyprland' "$root/overlay/usr/local/bin/start-datum"
+# Installer stages, logging, and target validation (no fake percentages,
+# no credential logging, self-check before reboot).
+grep -q 'STAGE_TOTAL=8' "$root/overlay/usr/local/bin/datum-install"
+grep -q 'emergence-installer.log' "$root/overlay/usr/local/bin/datum-install"
+grep -q 'validate_target' "$root/overlay/usr/local/bin/datum-install"
+grep -q 'Validating installation' "$root/overlay/usr/local/bin/datum-install"
+# Firstboot is a branded TUI loop, never a raw shell on error.
+grep -q 'DATUM  EMERGENCE' "$root/overlay/usr/local/bin/datum-firstboot-live"
+grep -q 'show_error' "$root/overlay/usr/local/bin/datum-firstboot-live"
 # Live/install user lifecycle contract.
 grep -q 'PERSISTENT_STATE_FILE=/etc/datum/live-user' "$root/overlay/usr/local/bin/datum-firstboot-live"
 grep -q 'no-block start greetd' "$root/overlay/usr/local/bin/datum-firstboot-live"

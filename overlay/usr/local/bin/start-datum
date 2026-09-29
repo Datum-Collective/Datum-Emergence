@@ -1,7 +1,17 @@
 #!/bin/sh
-
+# start-datum: launch the Datum Emergence Hyprland session.
+#
+# Uses Hyprland's start-hyprland watchdog when present (it supervises the
+# compositor and restarts it after an unclean exit). Arguments after --
+# are passed through to Hyprland. Falls back to a direct Hyprland launch
+# only on systems where the wrapper is absent.
 set -eu
 
 config_home=${XDG_CONFIG_HOME:-"$HOME/.config"}
+config="$config_home/hypr/hyprland.lua"
 
-exec Hyprland --config "$config_home/hypr/hyprland.lua"
+if command -v start-hyprland >/dev/null 2>&1; then
+  exec start-hyprland -- --config "$config"
+else
+  exec Hyprland --config "$config"
+fi

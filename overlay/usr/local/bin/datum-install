@@ -20,10 +20,26 @@ PROG=datum-install
 MNT=/mnt/datum-target
 ESP_SIZE_MIB=512
 MIN_DISK_MIB=10240
+LOG=/var/log/emergence-installer.log
 
 info() { printf '%s: %s\n' "$PROG" "$*" >&2; }
 die() { printf '%s: error: %s\n' "$PROG" "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required tool not found in live image: $1"; }
+# Detailed diagnostics go to the log file; the console stays a clean
+# stage/spinner view. Passwords, hashes, and the chpasswd input are never
+# written here: only stage names, timings, disk/filesystem operations,
+# and validation results are logged.
+log() {
+  mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+  printf '%s %s: %s\n' "$(date -u +%FT%TZ 2>/dev/null || echo '?')" "$PROG" "$*" >> "$LOG" 2>/dev/null || true
+}
+STAGE_N=0
+STAGE_TOTAL=8
+stage() {
+  STAGE_N=$((STAGE_N + 1))
+  info "[$STAGE_N/$STAGE_TOTAL] $*"
+  log "stage $STAGE_N/$STAGE_TOTAL: $*"
+}
 
 usage() {
   cat >&2 <<EOF
@@ -97,6 +113,7 @@ done
 DISK_MIB=$(($(lsblk -bn -o SIZE -d "$DISK") / 1048576))
 test "$DISK_MIB" -ge "$MIN_DISK_MIB" || die "$DISK is only ${DISK_MIB}MiB (need >= ${MIN_DISK_MIB}MiB)"
 
+log "install started: disk=$DISK size_mib=$DISK_MIB hostname=$HOSTNAME user=$NEWUSER timezone=$TIMEZONE"
 info "plan:"
 info "  disk:     $DISK (${DISK_MIB}MiB) -- ALL DATA WILL BE DESTROYED"
 info "  layout:   GPT: p1 ${ESP_SIZE_MIB}MiB ESP (FAT32), p2 rest root (ext4)"
@@ -104,7 +121,9 @@ info "  hostname: $HOSTNAME"
 info "  user:     $NEWUSER (any live-session account is removed from the target)"
 info "  timezone: $TIMEZONE"
 info "  boot:     GRUB x86_64-efi (NVRAM entry + removable fallback)"
+info "  log:      $LOG (detailed diagnostics; never contains passwords)"
 lsblk "$DISK" >&2 || true
+log "disk layout shown; waiting for explicit confirmation"
 test "$CONFIRM" = yes || die "re-run with --yes to confirm destruction of $DISK"
 
 # Password for the new user.
@@ -129,7 +148,8 @@ fi
 # Partition (sectors throughout: the only unit every sfdisk accepts; 2048 =
 # 1MiB alignment, 1048576 sectors = 512MiB ESP). Types are full GPT GUIDs:
 # sfdisk 2.42 rejects MBR codes like 83 on GPT labels.
-info "partitioning $DISK ..."
+stage "Preparing disk $DISK (GPT, 512MiB ESP + root)"
+log "partitioning $DISK"
 sfdisk --wipe always "$DISK" <<EOF
 label: gpt
 unit: sectors
@@ -152,11 +172,14 @@ for i in $(seq 1 15); do
 done
 test -b "$ESP" || die "EFI partition did not appear: $ESP"
 test -b "$ROOTP" || die "root partition did not appear: $ROOTP"
+log "partitions ready: ESP=$ESP ROOT=$ROOTP"
 
-info "creating filesystems ..."
+stage "Formatting filesystems (FAT32 ESP, ext4 root)"
 mkfs.vfat -F 32 -n DATUM_EFI "$ESP"
 mkfs.ext4 -q -L datum-root -F "$ROOTP"
+log "filesystems created"
 
+stage "Installing Emergence (copying live system)"
 info "mounting target ..."
 cleanup() {
   umount -R "$MNT" 2>/dev/null || true
@@ -168,6 +191,7 @@ mkdir -p "$MNT/boot/efi"
 mount "$ESP" "$MNT/boot/efi"
 
 info "copying live system (this takes a few minutes) ..."
+log "copy started"
 # NOTE: no --xattrs/--acls. The live overlayfs does not support listing
 # xattrs, so those flags only produce thousands of failing syscalls (and, in
 # a VM without a serial reader, enough warning spam to stall the copy on
@@ -203,6 +227,8 @@ cp -f /etc/resolv.conf "$MNT/etc/resolv.conf" 2>/dev/null || true
 
 target() { chroot "$MNT" /bin/sh -c "$1"; }
 
+stage "Configuring system (hostname, timezone, machine identity)"
+log "copy finished; writing fstab and host identity"
 info "configuring installed system ..."
 printf '%s\n' "$HOSTNAME" > "$MNT/etc/hostname"
 cat > "$MNT/etc/hosts" <<EOF
@@ -213,6 +239,8 @@ EOF
 # Fresh machine identity (never carry the live session's over).
 rm -f "$MNT/etc/machine-id" "$MNT/var/lib/dbus/machine-id"
 target "systemd-machine-id-setup"
+log "machine-id regenerated"
+stage "Creating user $NEWUSER (live-only identity removed from target)"
 # Live-only account cleanup. Booting the live ISO runs datum-firstboot-live,
 # which creates the account the user chose and records it in
 # /etc/datum/live-user (persistent, so it is copied onto the target by the
@@ -291,6 +319,7 @@ else
 fi
 printf '%s:%s\n' "$NEWUSER" "$NEW_PASSWORD" | target "chpasswd"
 NEW_PASSWORD=x; unset NEW_PASSWORD
+log "permanent user password set (value never logged)"
 target "passwd -l root || true"
 # Installed systems autologin the permanent user: the live image carries no
 # [initial_session] section (firstboot creates the account before greetd
@@ -308,7 +337,9 @@ user = "$NEWUSER"
 EOF
 # Timezone.
 ln -sf "/usr/share/zoneinfo/$TIMEZONE" "$MNT/etc/localtime"
+log "timezone set to $TIMEZONE"
 
+stage "Installing bootloader (GRUB UEFI + removable fallback)"
 # Bootloader. The dist-kernel + dracut initramfs are already in /boot from the
 # live image; just (re)install GRUB and generate the config on the target.
 # The removable fallback (BOOTX64.EFI) is mandatory: it is what boots on
@@ -334,10 +365,62 @@ fi
 # first-boot wizard must never run here: the installer created the permanent
 # user instead, so its unit and script are removed from the target outright
 # (disabling alone would leave live-only files behind).
+stage "Configuring desktop session (greetd, NetworkManager, firstboot cleanup)"
 target "systemctl enable NetworkManager.service greetd.service"
 target "systemctl disable datum-firstboot-live.service"
 rm -f "$MNT/etc/systemd/system/datum-firstboot-live.service" \
   "$MNT/usr/local/bin/datum-firstboot-live"
+
+stage "Validating installation (target self-check before reboot)"
+validate_target() {
+  # $1 = mountpoint. Fails loudly instead of declaring success on a
+  # half-written target. Mirrors the automated host-side checks in
+  # scripts/test-install.sh so manual installs get the same guarantees.
+  t=$1
+  vfail=0
+  vcheck() {
+    desc=$1; shift
+    if "$@" >/dev/null 2>&1; then
+      log "target check PASS: $desc"
+    else
+      info "target check FAIL: $desc"
+      log "target check FAIL: $desc"
+      vfail=1
+    fi
+  }
+  vcheck "target root exists" test -d "$t/etc"
+  vcheck "EFI partition mounted" test -d "$t/boot/efi"
+  vcheck "fstab UUID root" grep -Eq '^UUID=[^ ]+ +/ +ext4' "$t/etc/fstab"
+  vcheck "fstab UUID ESP" grep -Eq '^UUID=[^ ]+ +/boot/efi +vfat' "$t/etc/fstab"
+  vcheck "root UUID matches fstab" grep -q "UUID=$ROOT_UUID" "$t/etc/fstab"
+  vcheck "ESP UUID matches fstab" grep -q "UUID=$ESP_UUID" "$t/etc/fstab"
+  vcheck "machine-id present" test -s "$t/etc/machine-id"
+  vcheck "hostname correct" grep -qx "$HOSTNAME" "$t/etc/hostname"
+  vcheck "timezone link" test -L "$t/etc/localtime"
+  vcheck "kernel present" ls "$t"/boot/vmlinuz-*
+  vcheck "GRUB config present" test -f "$t/boot/grub/grub.cfg"
+  vcheck "GRUB UUID root" grep -Eq "root=UUID=$ROOT_UUID" "$t/boot/grub/grub.cfg"
+  vcheck "removable bootloader" test -f "$t/boot/efi/EFI/BOOT/BOOTX64.EFI"
+  vcheck "greetd config present" test -f "$t/etc/greetd/config.toml"
+  vcheck "installed autologin user" grep -q "user = \"$NEWUSER\"" "$t/etc/greetd/config.toml"
+  vcheck "target user exists" grep -q "^$NEWUSER:" "$t/etc/passwd"
+  vcheck "target home exists" test -d "$t/home/$NEWUSER"
+  vcheck "desktop launcher present" test -x "$t/usr/local/bin/start-datum"
+  vcheck "hyprland config present" test -f "$t/etc/skel/.config/hypr/hyprland.lua"
+  vcheck "live marker removed" test "!" -e "$t/etc/datum/live-user"
+  vcheck "live firstboot unit removed" test "!" -e "$t/etc/systemd/system/datum-firstboot-live.service"
+  vcheck "live firstboot script removed" test "!" -e "$t/usr/local/bin/datum-firstboot-live"
+  if test "$vfail" -ne 0; then
+    die "target validation failed; see $LOG. The disk was written but is NOT declared good."
+  fi
+  log "target validation passed"
+}
+validate_target "$MNT"
+log "install finished: user=$NEWUSER host=$HOSTNAME disk=$DISK"
+# Leave a sanitized copy of the install log on the target for post-install
+# diagnostics (it never contains passwords or hashes by construction).
+mkdir -p "$MNT/var/log" 2>/dev/null || true
+cp -f "$LOG" "$MNT/var/log/emergence-installer.log" 2>/dev/null || true
 
 info "unmounting ..."
 trap - EXIT INT TERM
