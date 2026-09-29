@@ -92,7 +92,17 @@ python3 - "$TELNET_PORT" "$TRANSCRIPT" "$GUEST_DISK" "$GUEST_DISK_BYTES" <<'PYEO
 import socket, sys, time
 telnet_port, transcript, disk, disk_bytes = int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
 tfile = open(transcript, "wb", buffering=0)
-s = socket.create_connection(("127.0.0.1", telnet_port), timeout=120)
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(5)
+for _ in range(60):
+    try:
+        s.connect(("127.0.0.1", telnet_port))
+        break
+    except OSError:
+        time.sleep(2)
+else:
+    print("FATAL: no telnet serial (QEMU never listened)")
+    sys.exit(1)
 s.settimeout(1.0)
 def filtered(data):
     # Strip telnet negotiation (IAC DO/WILL xxx), answering DO->WONT and
