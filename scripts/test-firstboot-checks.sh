@@ -222,13 +222,17 @@ elif name == "passwords":
         stype("alpha111")
         time.sleep(2)
         # Valid passwords emit no marker; the mismatch marker for the
-        # following confirm proves both arrived in order.
+        # following confirm proves both arrived in order. A mismatch
+        # restarts the whole setup at the USERNAME prompt (the rejected
+        # account was never created), so a username comes first again.
         stype("alpha222")
         if wait_counts({"password mismatch": 1}, 300):
             time.sleep(2)
-            stype("beta111")
-            time.sleep(2)
-            stype("beta111")
+            if synced("testuser"):
+                time.sleep(2)
+                stype("beta111")
+                time.sleep(2)
+                stype("beta111")
     ok = (not fails) and wait_counts({"username accepted: testuser": 1,
                                        "password mismatch": 1,
                                        "setup complete for testuser": 1}, 900)
