@@ -110,3 +110,30 @@ remains NOT TESTED in this environment (no VirtualBox available).
 - The "create user, login, Hyprland exits, back to tuigreet" failure is a
   regression case covered by the Hyprland=yes probe assertion; a future
   VirtualBox run must drive the same lifecycle there.
+
+## 7. Quiet boot and VT ownership (Failures A/B fix)
+
+- `livecd/bootargs` ships `quiet loglevel=3 systemd.show_status=no
+  rd.systemd.show_status=no udev.log_level=3`, so systemd/dracut status never
+  mixes with the firstboot form or prints start-job lines over tuigreet.
+  Probe/firstboot markers still reach CI via explicit writes to /dev/kmsg and
+  /dev/ttyS0, never via kernel console output.
+- `datum-firstboot-live.service` orders after `systemd-vconsole-setup`, owns
+  tty1 (Conflicts/Before), and the script does `chvt 1` + VT reset + clear
+  before painting, and clears tty1 again before handing off to greetd.
+- `datum-boot-probe.service` observes from the side: nothing orders greetd or
+  the session After it, `StandardOutput=null` + quiet cmdline keep it off
+  tty1, and `TimeoutStartSec` bounds its polls. It writes only to the
+  journal, /run/datum-boot-probe.result, /dev/kmsg and /dev/ttyS0.
+- `greetd` uses `vt = 1` + `switch = true` so exactly one process owns the
+  visible VT in each phase: firmware/GRUB -> quiet boot -> firstboot ->
+  tuigreet -> Hyprland.
+
+## 8. Guided installer (Omarchy principles, Gentoo way)
+
+- `datum-install` with no `--disk` on a terminal runs a guided 5-step TUI
+  (account+masked password, hostname, timezone, numbered disk menu hiding
+  live media and undersized disks, INSTALL-typed destructive confirmation,
+  staged progress, branded success screen). Pure POSIX sh, no new deps.
+- Flags + `EMERGENCE_INSTALL_PASSWORD` remain the automation seam; scripted
+  installs never enter the TUI.

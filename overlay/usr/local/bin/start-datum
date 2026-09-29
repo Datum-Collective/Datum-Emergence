@@ -5,7 +5,37 @@
 # compositor and restarts it after an unclean exit). Arguments after --
 # are passed through to Hyprland. Falls back to a direct Hyprland launch
 # only on systems where the wrapper is absent.
+#
+# Session contract (Failure C investigation aid):
+# - runs as the authenticated user under greetd/pam_systemd, so
+#   XDG_RUNTIME_DIR (/run/user/<uid>) and the user manager already exist;
+# - Wayland/session variables are defaulted here (never overridden when the
+#   session manager already set them) so Hyprland never inherits an X11 or
+#   empty session type from a misconfigured greeter;
+# - compositor output stays on stdout/stderr (greetd captures it into the
+#   journal; `journalctl --user -b` and coredumpctl are the diagnostic path),
+#   never redirected to the login VT, so a failure leaves evidence without
+#   flashing debug text at the next login.
 set -eu
+
+# Session type/desktop must read as Wayland/Hyprland for portals and clients.
+: "${XDG_SESSION_TYPE:=wayland}"; export XDG_SESSION_TYPE
+: "${XDG_CURRENT_DESKTOP:=Hyprland}"; export XDG_CURRENT_DESKTOP
+: "${XDG_SESSION_DESKTOP:=Hyprland}"; export XDG_SESSION_DESKTOP
+
+# pam_systemd normally sets this; fail loudly (into the journal, not the VT) if
+# the session arrived without one instead of launching Hyprland into a broken
+# runtime where it exits immediately with a clean-looking status.
+if test -z "${XDG_RUNTIME_DIR:-}"; then
+  printf 'start-datum: XDG_RUNTIME_DIR is unset; refusing to start Hyprland outside a logind session\n' >&2
+  exit 1
+fi
+
+# Evidence without VT spam: session output stays on stdout/stderr (greetd
+# captures it into the journal; `journalctl --user -b` and coredumpctl are the
+# diagnostic path), with a one-line marker via logger so the launch is
+# greppable even when the compositor produces no output before exiting.
+logger -t start-datum -- "launching Hyprland for $(id -un 2>/dev/null || echo '?') runtime=${XDG_RUNTIME_DIR} session=${XDG_SESSION_TYPE}" 2>/dev/null || true
 
 config_home=${XDG_CONFIG_HOME:-"$HOME/.config"}
 config="$config_home/hypr/hyprland.lua"

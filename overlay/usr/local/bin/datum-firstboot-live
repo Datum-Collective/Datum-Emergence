@@ -94,9 +94,19 @@ fi
 
 kmsg "starting user setup"
 
+# Take exclusive ownership of the visible VT before painting anything. The boot
+# path is quiet (livecd/bootargs), but stale getty text or a racing status line
+# can still linger; a VT switch + reset guarantees the TUI is the only thing
+# on screen (Failure A). All painting goes through fd 3 (the held TTY).
+chvt 1 2>/dev/null || true
+printf '\033c' >&3 2>/dev/null || true
+
 show_header() {
   # Monochrome, structured, Datum-branded firstboot screen. No debug output,
   # no raw shell interaction: just the product, the task, and the prompts.
+  # Clear first so each loop iteration repaint owns the screen instead of
+  # scrolling under leftover boot text.
+  printf '\033[H\033[2J' >&3 2>/dev/null || true
   say ""
   say "  +------------------------------------------------+"
   say "  |                DATUM  EMERGENCE                |"
@@ -189,6 +199,9 @@ while true; do
     kmsg "setup complete for $NEWUSER"
     trap - INT TERM
     exec 3<&- 2>/dev/null || true
+    # Leave tty1 blank for the greetd handoff: tuigreet repaints the VT, and
+    # any leftover form text behind it reads as a broken login screen.
+    printf '\033c' > /dev/tty1 2>/dev/null || true
     # --no-block: this unit is ordered Before=greetd.service while still
     # running, so a blocking start could deadlock waiting on ourselves.
     kmsg "starting greetd"

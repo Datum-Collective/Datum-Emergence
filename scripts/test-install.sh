@@ -286,6 +286,13 @@ for want in 'live-media=absent(installed?)' 'user.session=yes(datum)' \
     FAIL=1
   fi
 done
+# A compositor process without a Wayland socket is the exact "starts then
+# immediately exits / never really up" regression: require the socket the
+# probe records alongside user.session.hyprland=yes.
+if grep -q 'DATUM_PROBE user.session.wayland-socket=no' "$SERIAL_B"; then
+  printf '%s\n' 'test-install: MISSING/UNHEALTHY: user.session.wayland-socket (Hyprland up but no socket)' >&2
+  FAIL=1
+fi
 if test "$KEEP" = yes; then
   trap - EXIT INT TERM
   printf '%s\n' "test-install: keeping $DISK and $SERIAL_B" >&2

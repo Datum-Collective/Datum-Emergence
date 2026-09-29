@@ -71,6 +71,27 @@ grep -q 'disable datum-firstboot-live' "$root/overlay/usr/local/bin/datum-instal
 # Session launcher must use the Hyprland watchdog (the direct-Hyprland
 # invocation warns "launched without start-hyprland" and loses supervision).
 grep -q 'start-hyprland' "$root/overlay/usr/local/bin/start-datum"
+# Session environment contract (Failure C): Wayland/desktop defaults plus a
+# loud refusal outside a logind session, with journal evidence, never VT spam.
+grep -q 'XDG_SESSION_TYPE:=wayland' "$root/overlay/usr/local/bin/start-datum"
+grep -q 'XDG_CURRENT_DESKTOP:=Hyprland' "$root/overlay/usr/local/bin/start-datum"
+grep -q 'XDG_RUNTIME_DIR is unset' "$root/overlay/usr/local/bin/start-datum"
+# Quiet deterministic boot (Failures A/B): kernel cmdline silences status,
+# firstboot owns the VT, probe never blocks the login path.
+grep -q 'livecd/bootargs' "$root/catalyst/specs/emergence-amd64.spec"
+grep -q 'systemd.show_status=no' "$root/catalyst/specs/emergence-amd64.spec"
+grep -q 'switch = true' "$root/overlay/etc/greetd/config.toml"
+grep -q 'systemd-vconsole-setup' "$root/overlay/etc/systemd/system/datum-firstboot-live.service"
+grep -q 'chvt 1' "$root/overlay/usr/local/bin/datum-firstboot-live"
+grep -q 'StandardOutput=null' "$root/overlay/etc/systemd/system/datum-boot-probe.service"
+grep -q 'After=multi-user.target' "$root/overlay/etc/systemd/system/datum-boot-probe.service"
+# Guided installer contract: no-arg TUI (account/host/timezone/disk/confirm),
+# masked passwords, live-media hiding, explicit INSTALL confirmation.
+grep -q 'With no arguments and a terminal attached' "$root/overlay/usr/local/bin/datum-install"
+grep -q 'Step 1/5: account' "$root/overlay/usr/local/bin/datum-install"
+grep -q 'Step 5/5: confirm' "$root/overlay/usr/local/bin/datum-install"
+grep -q 'Type INSTALL to proceed' "$root/overlay/usr/local/bin/datum-install"
+grep -q 'Installation complete' "$root/overlay/usr/local/bin/datum-install"
 # Installer stages, logging, and target validation (no fake percentages,
 # no credential logging, self-check before reboot).
 grep -q 'STAGE_TOTAL=8' "$root/overlay/usr/local/bin/datum-install"

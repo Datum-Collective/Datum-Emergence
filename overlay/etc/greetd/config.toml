@@ -4,6 +4,11 @@
 # leave no usable credential path if it ever failed.
 [terminal]
 vt = 1
+# greetd takes over tty1 when it starts (firstboot cleared it just before the
+# handoff). Without switch=true the greeter can start on a VT the kernel is
+# not displaying, leaving stale text visible; with it the handoff is
+# deterministic: exactly one owner of tty1 per phase.
+switch = true
 
 [default_session]
 command = "tuigreet --greeting 'Datum Emergence' --cmd 'dbus-run-session /usr/local/bin/start-datum'"

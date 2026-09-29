@@ -1,12 +1,29 @@
 [Unit]
 Description=Datum boot self-check probe
-After=greetd.service NetworkManager.service multi-user.target
+# Diagnostic only: observes the boot and records into the journal,
+# /run/datum-boot-probe.result, /dev/kmsg and /dev/ttyS0. It must never block
+# or paint the user-facing path (Failure B):
+# - nothing orders greetd (or the session) After this unit, so the probe can
+#   never hold the login path hostage; on live media greetd is started
+#   imperatively by firstboot, on installed systems the probe is After=greetd;
+# - the quiet kernel cmdline (livecd/bootargs: systemd.show_status=no)
+#   suppresses "A start job is running ..." status on the VT;
+# - StandardOutput=null guarantees nothing lands on tty1 even if a future
+#   probe line prints by accident; TimeoutStartSec bounds the polls.
+After=multi-user.target greetd.service NetworkManager.service
 Wants=NetworkManager.service
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/datum-boot-probe
 RemainAfterExit=no
+# Belt and suspenders: the script writes only to the journal/kmsg/serial/result
+# file, but an explicit null stdout guarantees nothing can ever land on tty1
+# even if a future probe line prints by accident.
+StandardOutput=null
+StandardError=journal
+# Never restart into the login VT; a slow poll must not hold boot hostage.
+TimeoutStartSec=420
 
 [Install]
 WantedBy=multi-user.target

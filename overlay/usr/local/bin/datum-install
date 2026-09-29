@@ -50,6 +50,11 @@ usage: $PROG --disk DEVICE [--hostname NAME] [--user NAME] [--timezone ZONE] [--
   --timezone  e.g. UTC, Europe/Berlin (default: UTC)
   --yes       confirm the destructive operation (also prints the plan first)
   --reboot    reboot when finished
+
+  With no arguments and a terminal attached, $PROG starts a guided
+  installer (username, password, hostname, timezone, disk choice,
+  destructive confirmation, staged progress). Flags remain the automation
+  seam (tests, unattended installs via EMERGENCE_INSTALL_PASSWORD).
 EOF
   exit 2
 }
@@ -60,19 +65,161 @@ NEWUSER=datum
 TIMEZONE=UTC
 CONFIRM=no
 REBOOT=no
+GAVE_DISK=no
+GAVE_USER=no
+GAVE_HOST=no
+GAVE_TZ=no
 
 while test $# -gt 0; do
   case "$1" in
-    --disk) DISK=${2:?--disk needs a value}; shift 2 ;;
-    --hostname) HOSTNAME=${2:?--hostname needs a value}; shift 2 ;;
-    --user) NEWUSER=${2:?--user needs a value}; shift 2 ;;
-    --timezone) TIMEZONE=${2:?--timezone needs a value}; shift 2 ;;
+    --disk) DISK=${2:?--disk needs a value}; GAVE_DISK=yes; shift 2 ;;
+    --hostname) HOSTNAME=${2:?--hostname needs a value}; GAVE_HOST=yes; shift 2 ;;
+    --user) NEWUSER=${2:?--user needs a value}; GAVE_USER=yes; shift 2 ;;
+    --timezone) TIMEZONE=${2:?--timezone needs a value}; GAVE_TZ=yes; shift 2 ;;
     --yes) CONFIRM=yes; shift ;;
     --reboot) REBOOT=yes; shift ;;
     -h|--help) usage ;;
     *) usage ;;
   esac
 done
+
+# Guided installer: no --disk on a terminal means the human wants the full
+# Datum flow (account, hostname, timezone, disk, confirmation) instead of raw
+# flags. Automation (tests, scripts) always passes --disk, so it never lands
+# here. Pure POSIX sh, no dialog/whiptail dependency: clean screen, Datum
+# branding, masked passwords, validation with reprompts, numbered disk menu
+# that hides the live media, explicit destructive confirmation.
+if test "$GAVE_DISK" = no && test -c /dev/tty; then
+  tui_say() { printf '%s\n' "$*" > /dev/tty; }
+  tui_header() {
+    printf '\033[H\033[2J' > /dev/tty 2>/dev/null || true
+    tui_say ""
+    tui_say "  +------------------------------------------------+"
+    tui_say "  |                DATUM  EMERGENCE                |"
+    tui_say "  |                  Install system                |"
+    tui_say "  +------------------------------------------------+"
+    tui_say ""
+  }
+  tui_err() { tui_say ""; tui_say "  ! $1"; tui_say "  Please try again."; tui_say ""; }
+  tui_ask() {
+    # $1 = prompt, $2 = default. Echoes answer on stdout.
+    _p=$1; _d=$2
+    if test -n "$_d"; then printf '%s [%s]: ' "$_p" "$_d" > /dev/tty;
+    else printf '%s: ' "$_p" > /dev/tty; fi
+    IFS= read -r _a < /dev/tty || _a=""
+    if test -z "$_a"; then printf '%s' "$_d"; else printf '%s' "$_a"; fi
+  }
+  tui_ask_hidden() {
+    # $1 = prompt. Echoes answer on stdout, input masked.
+    _p=$1
+    printf '%s: ' "$_p" > /dev/tty
+    stty -echo < /dev/tty 2>/dev/null || true
+    IFS= read -r _a < /dev/tty || _a=""
+    stty echo < /dev/tty 2>/dev/null || true
+    printf '\n' > /dev/tty
+    printf '%s' "$_a"
+  }
+  valid_tui_user() {
+    case "$1" in ""|root|emergence|greeter|greetd|*[^a-z0-9_-]*|-[a-z0-9_-]*|[0-9]*) return 1;; esac
+    return 0
+  }
+  # 1/5 account + hostname + timezone.
+  while true; do
+    tui_header
+    tui_say "  Step 1/5: account"
+    if test "$GAVE_USER" = no; then
+      NEWUSER=$(tui_ask "  Username" "datum")
+      if ! valid_tui_user "$NEWUSER"; then tui_err "Invalid username '$NEWUSER'."; sleep 1; continue; fi
+    fi
+    while true; do
+      _pw1=$(tui_ask_hidden "  Password")
+      _pw2=$(tui_ask_hidden "  Confirm password")
+      if test -z "$_pw1"; then tui_err "Empty password rejected."; continue; fi
+      if test "$_pw1" != "$_pw2"; then tui_err "Passwords do not match."; continue; fi
+      EMERGENCE_INSTALL_PASSWORD_TUI=$_pw1
+      break
+    done
+    break
+  done
+  if test "$GAVE_HOST" = no; then
+    while true; do
+      tui_header
+      tui_say "  Step 2/5: hostname"
+      HOSTNAME=$(tui_ask "  Hostname" "emergence")
+      case "$HOSTNAME" in *[!a-zA-Z0-9-]*|"") tui_err "Invalid hostname."; sleep 1; continue;; esac
+      break
+    done
+  fi
+  if test "$GAVE_TZ" = no; then
+    while true; do
+      tui_header
+      tui_say "  Step 3/5: timezone"
+      tui_say "  Examples: UTC, Europe/Berlin, Asia/Kolkata"
+      TIMEZONE=$(tui_ask "  Timezone" "UTC")
+      if ! test -f "/usr/share/zoneinfo/$TIMEZONE"; then tui_err "Unknown timezone '$TIMEZONE'."; sleep 1; continue; fi
+      break
+    done
+  fi
+  # 4/5 disk: enumerate whole disks, hide live media + tiny devices.
+  while true; do
+    tui_header
+    tui_say "  Step 4/5: installation disk"
+    tui_say "  ALL DATA on the chosen disk will be destroyed."
+    tui_say ""
+    _i=0; _list=""
+    for _d in $(lsblk -dn -o PATH 2>/dev/null); do
+      _bytes=$(lsblk -bn -o SIZE -d "$_d" 2>/dev/null || echo 0)
+      _mib=$((_bytes / 1048576))
+      if test "$_mib" -lt "$MIN_DISK_MIB"; then continue; fi
+      _live=no
+      for _cand in /mnt/cdrom /run/live /run/archiso/bootmnt; do
+        if findmnt -n -o SOURCE "$_cand" 2>/dev/null | grep -q "^$_d"; then _live=yes; fi
+      done
+      if test "$_live" = yes; then continue; fi
+      _i=$((_i + 1))
+      _model=$(lsblk -dn -o MODEL "$_d" 2>/dev/null | sed 's/^ *//;s/ *$//')
+      _size=$(lsblk -dn -o SIZE "$_d" 2>/dev/null | sed 's/^ *//')
+      tui_say "  [${_i}] $_d  $_size  $_model"
+      _list="$_list $_d"
+    done
+    if test "$_i" -eq 0; then
+      tui_err "No suitable disk found (need >= ${MIN_DISK_MIB}MiB, live media hidden)."
+      die "no suitable installation disk"
+    fi
+    tui_say ""
+    _pick=$(tui_ask "  Choose disk [1-$_i]")
+    case "$_pick" in ''|*[!0-9]*) tui_err "Enter a number 1-$_i."; sleep 1; continue;; esac
+    if test "$_pick" -lt 1 -o "$_pick" -gt "$_i" 2>/dev/null; then tui_err "Out of range."; sleep 1; continue; fi
+    _n=0; for _d in $_list; do _n=$((_n + 1)); if test "$_n" = "$_pick"; then DISK=$_d; fi; done
+    break
+  done
+  # 5/5 destructive confirmation with summary.
+  while true; do
+    tui_header
+    _dmib=$(($(lsblk -bn -o SIZE -d "$DISK" 2>/dev/null || echo 0) / 1048576))
+    tui_say "  Step 5/5: confirm"
+    tui_say ""
+    tui_say "  Disk:      $DISK"
+    tui_say "  Username:  $NEWUSER"
+    tui_say "  Hostname:  $HOSTNAME"
+    tui_say "  Timezone:  $TIMEZONE"
+    tui_say ""
+    tui_say "  This will ERASE everything on $DISK (${_dmib}MiB)."
+    tui_say ""
+    _yn=$(tui_ask "  Type INSTALL to proceed, or Cancel [Cancel]")
+    if test "$_yn" = "INSTALL"; then CONFIRM=yes; break; fi
+    tui_say "  Installation cancelled; no changes were made."
+    exit 1
+  done
+  if test -z "${EMERGENCE_INSTALL_PASSWORD:-}" && test -n "${EMERGENCE_INSTALL_PASSWORD_TUI:-}"; then
+    EMERGENCE_INSTALL_PASSWORD=$EMERGENCE_INSTALL_PASSWORD_TUI
+    export EMERGENCE_INSTALL_PASSWORD
+    EMERGENCE_INSTALL_PASSWORD_TUI=x; unset EMERGENCE_INSTALL_PASSWORD_TUI
+  fi
+  tui_header
+  tui_say "  Installing ..."
+  tui_say ""
+fi
 
 test -n "$DISK" || usage
 test "$(id -u)" -eq 0 || die "run as root (e.g. with sudo)"
@@ -426,6 +573,10 @@ info "unmounting ..."
 trap - EXIT INT TERM
 umount -R "$MNT"
 rmdir "$MNT" 2>/dev/null || true
+if test -c /dev/tty && test "$GAVE_DISK" = no; then
+  printf '\033[H\033[2J' > /dev/tty 2>/dev/null || true
+  printf '%s\n' "" "  +------------------------------------------------+" "  |                DATUM  EMERGENCE                |" "  |              Installation complete             |" "  +------------------------------------------------+" "" "  Installed on $DISK (user $NEWUSER, host $HOSTNAME)." "  Remove the live ISO and boot from $DISK." "" > /dev/tty
+fi
 info "installed Datum Emergence on $DISK (user $NEWUSER, host $HOSTNAME)."
 info "remove the live ISO and boot from $DISK."
 if test "$REBOOT" = yes; then
