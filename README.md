@@ -16,11 +16,11 @@ administration model.
 
 ## Download
 
-Testing ISO (v0.1.3 prerelease, UEFI x86_64 live + installer):
+Testing ISO (v0.1.4 prerelease, UEFI x86_64 installer):
 
 - [emergence-amd64.iso](https://github.com/Datum-Collective/Datum-Emergence/releases/latest/download/emergence-amd64.iso)
-  (2,088,607,744 bytes, SHA256
-  `a96023f3b2468a82929497f3a0a0ee29d6eb8d1e82029150430b69702c87c3ba`)
+  (2,088,611,840 bytes, SHA256
+  `b2b2a9cc67fd1435fd20106abbcfd4c7b3ddce60e4dcab422498bdea61546611`)
 
 Verify after downloading (Linux):
 
@@ -35,19 +35,20 @@ sudo dd if=emergence-amd64.iso of=/dev/sdX bs=4M status=progress oflag=sync
 ```
 
 Or use Fedora Media Writer, Balena Etcher, or Ventoy. Then boot the machine
-from USB: the first-boot setup asks for a username and password for the
-live session, after which you log in and reach the Hyprland desktop. Run
-the installer from the live desktop (see Install below).
+from USB: the ISO boots straight into the Datum Emergence installer
+(keyboard, user account, hostname, timezone, disk, confirmation), installs
+to the chosen disk, and reboots into the installed system, where you log in
+through greetd/tuigreet into the Hyprland desktop. There is no live login:
+the ISO is an installer environment.
 
 ## Status
 
 The repository builds a Catalyst `livecd-stage1`/`livecd-stage2` pipeline
-from a clean Gentoo stage3, ships a UEFI-bootable live ISO with a
-first-boot user setup (you choose the live username and password, then log
-in through greetd/tuigreet into Hyprland), and installs to disk with the
-included `datum-install` tool. The full chain (clean inputs, stage1, ISO,
-QEMU UEFI boot, firstboot setup, live desktop, install to a blank virtual
-disk, boot of the installed system) has been tested end-to-end.
+from a clean Gentoo stage3 and ships a UEFI-bootable installer ISO. The
+full chain (clean inputs, stage1, ISO, QEMU UEFI boot into the installer,
+guided install to a blank virtual disk, boot of the installed system,
+tuigreet login, Hyprland desktop) is tested end-to-end; see
+`docs/installer-architecture.md`.
 
 The build is traceable rather than bit-for-bit reproducible: Gentoo rolling
 inputs are recorded in `dist/emergence-build-info.txt`. Supply a fixed stage3
@@ -171,28 +172,25 @@ Structural checks:
 file dist/emergence-amd64.iso        # ISO 9660, bootable, DATUM_EMERGENCE_AMD64
 ```
 
-Automated boot check (headless QEMU/KVM, UEFI, serial console, ~7 minutes):
+Automated boot check (headless QEMU/KVM, UEFI, serial console):
 
 ```sh
 ./build.sh test-ci
 ```
 
-It drives the real firstboot lifecycle (username/password setup, tuigreet
-login) and asserts systemd booted, NetworkManager and greetd are active,
-the chosen live user session with Hyprland exists, and the Datum overlay
-files are present. A VNC/screenshot run additionally confirmed the rendered
-desktop (Waybar, cursor, no config errors).
-
-Firstboot edge cases (invalid usernames, password confirmation, password
-secrecy on the console) are covered separately:
+It boots the installer ISO headless and asserts the installer service is
+active, the live marker is present, no login session exists on live media,
+and the installer menu was reached. The interactive installer itself is
+driven like a human through the QEMU monitor:
 
 ```sh
-./build.sh test-firstboot        # all scenarios (direct-kernel, serial console)
-./build.sh test-firstboot passwords
+sudo ./build.sh test-installer-tui   # guided install incl. input validation
 ```
 
 Attach the ISO via virtio in VMs: the dist kernel does not enumerate QEMU's
-legacy IDE CD-ROM in this configuration, while virtio-blk works.
+legacy IDE CD-ROM in this configuration, while virtio-blk works. The ISO
+drive is attached read-only in tests so a disk-selection bug cannot harm
+the medium.
 
 ## Install
 
@@ -200,35 +198,42 @@ legacy IDE CD-ROM in this configuration, while virtio-blk works.
 > target disk: new GPT, new filesystems, all previous data destroyed. There
 > is no undo. Double-check `--disk` with `lsblk` before confirming.
 >
-> - The installer refuses non-block devices, mounted partitions, disks
->   smaller than 10 GiB, and (best effort) the device the live image booted
->   from.
-> - It still requires explicit `--yes`. Read the printed plan first.
+> - The installer refuses non-block devices, optical drives, the device the
+>   live image booted from, mounted partitions, and disks smaller than
+>   10 GiB.
+> - The guided installer requires typing `yes` at the confirmation screen;
+>   flags mode still requires explicit `--yes`. Read the plan first.
 > - Never aim it at a disk containing data you need. Unplug other drives
 >   when installing on physical hardware if you are unsure.
 
-From the booted live ISO, as root:
+Boot the ISO: the installer menu offers Install / Shell / Reboot /
+Power off. The guided flow collects keyboard, user account (typed twice,
+masked), hostname, timezone, shows a summary, lists disks with their
+partitions (live media hidden), requires explicit confirmation, installs
+with staged progress, and validates the target before declaring success.
+
+Non-interactive (automation only):
 
 ```sh
 sudo datum-install --disk /dev/vdX --user datum --hostname emergence --yes
 ```
 
 This creates a 512 MiB EFI System Partition plus an ext4 root, copies the
-live system, removes the live-session account from the copy (the account
-the firstboot setup created is live-only; the installer refuses to inherit
-any unexpected account), writes UUID-based fstab, installs GRUB for UEFI
-(NVRAM entry plus the removable `BOOTX64.EFI` fallback), creates the
-permanent first local user (which the installed system autologs in),
-sets the hostname/timezone, regenerates the machine ID, and strips all
-live-firstboot state from the target. If the requested installed username
-matches the live-session name, that account is adopted (password and groups
-reset). Remove the ISO and boot the installed disk.
+live system, writes UUID-based fstab, installs GRUB for UEFI (NVRAM entry
+plus the removable `BOOTX64.EFI` fallback), creates exactly one permanent
+target user (the live ISO never has any user, so there is nothing to
+adopt or leak), sets hostname/timezone/keyboard, configures a quiet boot,
+enables greetd with the tuigreet login (no autologin), regenerates the
+machine ID, writes the installed-state marker, and strips all
+live-installer state from the target. Remove the ISO and boot the
+installed disk; log in as the created user to reach Hyprland.
 
-Fully automated VM test (blank 20 GiB disk, install, reboot from disk,
-verify services/session/desktop/fstab/bootloader/live-user removal):
+Fully automated VM tests (blank 20 GiB disk, install, reboot from disk,
+real tuigreet login, desktop session, fstab/bootloader/marker checks):
 
 ```sh
-./build.sh test-install
+sudo ./build.sh test-installer-tui   # interactive TUI path
+./build.sh test-install               # flags/engine path
 ```
 
 ## Desktop and customization
@@ -256,6 +261,11 @@ Shell prompt: add `eval "$(starship init bash)"` to your interactive shell
   hyprpaper wallpaper in the VM even though the rice configuration is
   byte-identical to the reference setup that displays it on real hardware.
   Session, compositor, and clients are verified working regardless.
+- Hyprland 0.56 requires a kernel DRM device: it runs on QEMU std VGA
+  (bochs-drm) and virtio-gpu, but aborts at startup on GPUs that present
+  no DRM (e.g. vmware-SVGA-on-QEMU, where vmwgfx refuses the hypervisor).
+  See `docs/hyprland-root-cause.md`. Physical hardware with working DRM
+  is the acceptance target; VirtualBox VMSVGA is untested here.
 - QEMU legacy IDE CD-ROM is not enumerated by the dist kernel in this
   configuration; attach the ISO via virtio in VMs. Real SATA/USB hardware
   uses built-in drivers.

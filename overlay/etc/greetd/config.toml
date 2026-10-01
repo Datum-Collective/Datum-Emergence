@@ -1,13 +1,13 @@
-# No initial_session: the live user is created interactively by
-# datum-firstboot-live before greetd starts, then logs in here with a
-# password like on any normal system. A hardcoded autologin account would
-# leave no usable credential path if it ever failed.
+# No initial_session: every login here uses a password like on any normal
+# system. A hardcoded autologin account would leave no usable credential
+# path if it ever failed. (The live ISO never starts greetd at all: it
+# boots into the installer. This config serves the installed system, where
+# datum-install enables greetd after creating the permanent user.)
 [terminal]
 vt = 1
-# greetd takes over tty1 when it starts (firstboot cleared it just before the
-# handoff). Without switch=true the greeter can start on a VT the kernel is
-# not displaying, leaving stale text visible; with it the handoff is
-# deterministic: exactly one owner of tty1 per phase.
+# greetd takes over tty1 at boot. Without switch=true the greeter can start
+# on a VT the kernel is not displaying, leaving stale text visible; with it
+# the handoff is deterministic: exactly one owner of tty1 per phase.
 switch = true
 
 [default_session]

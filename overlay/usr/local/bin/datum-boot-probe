@@ -1,11 +1,17 @@
 #!/bin/sh
 # datum-boot-probe: one-shot live/installed boot self-check.
 #
-# Waits for the graphical live session to settle, then records what actually
-# came up: systemd state, services, the greetd/Hyprland session, and Datum
+# Records what actually came up: systemd state, services, the installer (on
+# live media), the greetd/Hyprland session (on installed systems), and Datum
 # branding. Results go to the journal, /dev/kmsg, /dev/ttyS0 (captured by
 # hypervisors with a serial console), and /run/datum-boot-probe.result.
 # Always exits 0; it reports, it never fails the boot.
+#
+# Non-blocking by design: nothing orders any other unit After this one, its
+# stdout is null (service unit), the quiet kernel cmdline suppresses systemd
+# status display, and TimeoutStartSec bounds the polls. It must never own,
+# block, or paint the user-facing VT (installer on live, tuigreet on
+# installed).
 set -eu
 
 RESULT=/run/datum-boot-probe.result
@@ -23,10 +29,11 @@ emit() {
 
 emit "begin $(date -u +%FT%TZ) $(cat /proc/cmdline 2>/dev/null)"
 
-# System state.
+# System state. On live media the product is the installer; on installed
+# systems it is the greeter/desktop. Neither is ordered after this probe.
 if command -v systemctl >/dev/null 2>&1; then
   emit "system=$(systemctl is-system-running 2>/dev/null || echo unknown)"
-  for svc in NetworkManager.service greetd.service datum-firstboot-live.service; do
+  for svc in NetworkManager.service greetd.service datum-installer.service; do
     if systemctl list-unit-files "$svc" >/dev/null 2>&1; then
       emit "service.$svc=$(systemctl is-active $svc 2>/dev/null || echo unknown)"
     fi
@@ -40,33 +47,17 @@ else
   emit "live-media=absent(installed?)"
 fi
 
-# Session detection. On live media the firstboot setup records the username
-# it created in /run/datum-live-user; that file is authoritative (never guess
-# system accounts). On installed systems there is no state file, so detect
-# logged-in human users (uid >= 1000) instead. Never hardcode a username.
+# Session detection. The live ISO is an installer environment: no one ever
+# logs in there, so no session is expected (the installer owns tty1). On
+# installed systems, detect the human user (uid >= 1000) that logged in
+# through tuigreet. Never hardcode a username.
 SESSION_USER=""
-EXPECTED_USER=""
-if test -f /run/datum-live-user; then
-  EXPECTED_USER=$(cat /run/datum-live-user 2>/dev/null | tr -d '[:space:]')
-fi
-if test -n "$EXPECTED_USER"; then
-  emit "firstboot.status=complete(user=$EXPECTED_USER)"
-  # The tuigreet login is typed by a human (or the test harness) after the
-  # probe already started; allow a generous window for it.
-  for i in $(seq 1 45); do
-    if loginctl show-user "$EXPECTED_USER" >/dev/null 2>&1; then
-      SESSION_USER=$EXPECTED_USER
-      break
-    fi
-    sleep 2
-  done
-elif test -e /dev/disk/by-label/DATUM_EMERGENCE_AMD64; then
-  # Live boot with no configured user (yet): firstboot has not finished.
-  emit "firstboot.status=incomplete"
+if test -e /dev/disk/by-label/DATUM_EMERGENCE_AMD64; then
+  emit "installer.expected=active(no login session on live media)"
+  emit "user.session=no(live-installer)"
 else
-  # Installed system: the permanent user autologs in through greetd's
-  # initial_session, but session registration takes seconds; poll like above
-  # instead of racing it.
+  # Installed system: the permanent user logs in through tuigreet, but
+  # session registration takes seconds; poll instead of racing it.
   for i in $(seq 1 30); do
     for u in $(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}'); do
       uid=$(id -u "$u" 2>/dev/null || echo 0)
@@ -82,6 +73,8 @@ else
 fi
 if test -n "$SESSION_USER"; then
   emit "user.session=yes($SESSION_USER)"
+elif test -e /dev/disk/by-label/DATUM_EMERGENCE_AMD64; then
+  : # already reported above; keep live output stable
 else
   emit "user.session=no"
 fi
@@ -96,7 +89,7 @@ if test -n "$SESSION_USER"; then
     if pgrep -u "$SESSION_USER" -x Hyprland >/dev/null 2>&1; then
       HYPRLAND=yes
     fi
-    # Any UID's runtime dir (live and installed UIDs differ per setup).
+    # Any UID's runtime dir (installed UIDs differ per setup).
     for rtdir in /run/user/*; do
       for sock in "$rtdir"/wayland-* "$rtdir"/hypr/*/.hyprland.sock "$rtdir"/hypr/*/hyprland.sock; do
         if test -S "$sock" 2>/dev/null || test -e "$sock" 2>/dev/null; then
@@ -113,8 +106,21 @@ if test -n "$SESSION_USER"; then
 fi
 emit "user.session.hyprland=$HYPRLAND"
 emit "user.session.wayland-socket=$WAYLAND_SOCK"
-# Compositor helpers: are they alive, and what did they log?
+# Compositor helpers: give exec-once apps an extra settle window after the
+# socket appears before recording their final state, so autostart lag is not
+# misreported as a broken desktop.
 if test -n "$SESSION_USER"; then
+  for i in $(seq 1 12); do
+    ALL_UP=yes
+    for app in hyprpaper waybar dunst; do
+      if ! pgrep -u "$SESSION_USER" -x "$app" >/dev/null 2>&1; then
+        ALL_UP=no
+        break
+      fi
+    done
+    if test "$ALL_UP" = yes; then break; fi
+    sleep 5
+  done
   for app in hyprpaper waybar dunst wofi kitty Hyprland; do
     if pgrep -u "$SESSION_USER" -x "$app" >/dev/null 2>&1; then
       emit "user.session.app.$app=running"
@@ -123,7 +129,7 @@ if test -n "$SESSION_USER"; then
     fi
   done
 fi
-# Ask the compositor about outputs and the running hyprpaper what it loaded.
+# Ask the compositor about outputs (this also proves hyprctl can talk to it).
 if test -n "$SESSION_USER"; then
   SUID=$(id -u "$SESSION_USER" 2>/dev/null || echo "")
   if test -n "$SUID"; then
@@ -146,6 +152,15 @@ if command -v journalctl >/dev/null 2>&1; then
     emit "journal.err: $(printf '%s' "$line" | cut -c1-200)"
   done
 fi
+# DRM/GPU inventory: Hyprland 0.56 requires a DRM device; a system with no
+# /dev/dri entries cannot start the compositor (software fallback is not
+# provided by this backend). Recording this here distinguishes a broken
+# session stack from an unsupported virtual GPU without guessing.
+if test -d /dev/dri; then
+  emit "gpu.dri=$(ls /dev/dri 2>/dev/null | tr '\n' ',' || echo unknown)"
+else
+  emit "gpu.dri=absent(no DRM devices; Hyprland cannot start here)"
+fi
 
 # Branding / identity.
 for f in /usr/share/backgrounds/datum-emergence/wallpaper.png /etc/emergence/release /etc/hostname; do
@@ -159,10 +174,17 @@ if test -e /etc/hostname; then
   emit "hostname=$(cat /etc/hostname 2>/dev/null)"
 fi
 
-# Installation verification (meaningful on installed systems; on the live
-# ISO these just record live state).
+# Live/installed state separation. The live ISO carries /etc/datum/live; the
+# installer removes it from the target and writes /etc/datum/installed
+# instead. A healthy installed boot therefore has the installed marker, no
+# live marker, and a real human session.
 if test -e /dev/disk/by-label/DATUM_EMERGENCE_AMD64; then
   emit "installer.fstab-root=live-iso"
+  if test -e /etc/datum/live; then
+    emit "installer.live-marker=present"
+  else
+    emit "installer.live-marker=MISSING"
+  fi
 else
   if grep -Eq '^UUID=[^ ]+ +/ +ext4' /etc/fstab 2>/dev/null; then
     emit "installer.fstab-root=uuid-ok"
@@ -179,21 +201,18 @@ else
   else
     emit "installer.removable-bootloader=MISSING"
   fi
-  # No live-firstboot state may survive into an installed system: the
-  # installer removes the live-only account from the target synchronously and
-  # deletes the /etc/datum/live-user marker (a lingering marker means the
-  # live identity leaked into the installation). A healthy installed boot
-  # therefore has no marker and a real human session (the autologged-in
-  # permanent user).
-  if test -e /etc/datum/live-user; then
-    emit "installer.live-user-removed=no(MARKER PRESENT)"
-  elif test -n "$SESSION_USER"; then
-    emit "installer.live-user-removed=yes"
+  if test -e /etc/datum/installed; then
+    emit "installer.installed-marker=present"
   else
-    emit "installer.live-user-removed=no(NO SESSION)"
+    emit "installer.installed-marker=MISSING"
+  fi
+  if test -e /etc/datum/live; then
+    emit "installer.live-marker-removed=no(MARKER PRESENT)"
+  else
+    emit "installer.live-marker-removed=yes"
   fi
 fi
-# First local user: the account the current graphical session runs as, if any.
+# The account the current graphical session runs as, if any.
 if command -v loginctl >/dev/null 2>&1; then
   emit "session.users=$(loginctl list-users --no-legend 2>/dev/null | awk '{print $2}' | tr '\n' ',' || echo unknown)"
 fi

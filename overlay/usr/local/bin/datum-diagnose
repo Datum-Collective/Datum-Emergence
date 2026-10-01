@@ -1,0 +1,86 @@
+#!/bin/sh
+# datum-diagnose: session/graphics/compositor forensics collector.
+#
+# Runs the Hyprland root-cause checklist in one place and prints it to
+# stdout (redirect to serial or a file; nothing is painted on any VT by
+# this script itself). Safe to run as any user; root sees more (coredumps,
+# all sessions). Never prints secrets: only usernames, UIDs, device nodes,
+# service states, and log excerpts.
+#
+# Usage:
+#   datum-diagnose > /dev/ttyS0
+#   datum-diagnose > /tmp/datum-diagnose.txt
+set -u
+
+export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+say() { printf '%s\n' "$*"; }
+sec() { say ""; say "===== $* ====="; }
+run() {
+  say "\$ $*"
+  "$@" 2>&1 | head -n 40
+}
+
+sec "identity"
+run id
+say "USER=$USER HOME=$HOME"
+
+sec "session"
+run loginctl --no-legend list-sessions
+if test -n "${XDG_SESSION_ID:-}"; then
+  run loginctl session-status "$XDG_SESSION_ID"
+fi
+run loginctl show-user "$USER"
+
+sec "environment"
+for v in XDG_RUNTIME_DIR WAYLAND_DISPLAY DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_ID XDG_SEAT XDG_VTNR; do
+  eval "val=\${$v:-<unset>}"
+  say "$v=$val"
+done
+
+sec "runtime dir"
+if test -n "${XDG_RUNTIME_DIR:-}" && test -d "$XDG_RUNTIME_DIR"; then
+  run ls -la "$XDG_RUNTIME_DIR"
+else
+  say "no usable XDG_RUNTIME_DIR"
+fi
+
+sec "graphics"
+run lspci -nnk
+say "--- /dev/dri ---"
+ls -l /dev/dri /dev/dri/by-path 2>&1 | head -n 20
+say "--- mesa dri drivers ---"
+ls /usr/lib64/dri 2>&1 | head -n 20
+
+sec "hyprland binaries"
+run which Hyprland start-hyprland hyprctl
+run file /usr/bin/start-hyprland
+if test -n "${XDG_RUNTIME_DIR:-}"; then
+  XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" Hyprland --version 2>&1 | head -n 3
+else
+  say "skipping Hyprland --version (no runtime dir; it aborts without one)"
+fi
+say "--- ldd missing ---"
+ldd /usr/bin/Hyprland 2>&1 | grep -i 'not found' | head -n 10
+say "(empty above means all libraries resolve)"
+
+sec "compositor state"
+run pgrep -a -x Hyprland
+if test -n "${XDG_RUNTIME_DIR:-}"; then
+  ls -l "$XDG_RUNTIME_DIR"/wayland-* 2>&1 | head -n 5
+  ls -l "$XDG_RUNTIME_DIR"/hyprland.log "$XDG_RUNTIME_DIR"/hypr/*/hyprland.log 2>&1 | head -n 5
+fi
+say "--- user unit failures ---"
+systemctl --user --failed --no-legend 2>&1 | head -n 10
+
+sec "coredumps"
+coredumpctl list 2>&1 | tail -n 10
+
+sec "recent session errors"
+journalctl --user -b -p warning --no-pager 2>&1 | tail -n 20
+
+sec "hyprland config"
+say "config=$HOME/.config/hypr/hyprland.lua"
+ls -l "$HOME/.config/hypr/hyprland.lua" 2>&1 | head -n 2
+
+say ""
+say "datum-diagnose complete."

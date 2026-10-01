@@ -1,139 +1,193 @@
-# Emergence installer architecture (v0.1.2 post-review note)
+# Emergence installer architecture (installer-first)
 
-This note records the installer/firstboot design as implemented, the Omarchy
-lessons adopted or rejected, and the Gentoo-specific constraints. It exists
-so the installer does not regress into one giant fragile shell script.
+This note records the installer design, the Omarchy lessons adopted or
+rejected, the Hyprland root-cause finding, and the Gentoo-specific
+constraints. It exists so the installer does not regress into one giant
+fragile shell script, and so the live/install separation is never blurred
+again.
 
 ## 1. Boundaries
 
 ```
 Catalyst          = build the prepared Emergence OS (stage1 + live ISO)
-ISO               = carry the prepared OS + live-only setup
-datum-install     = deploy the prepared OS to a target disk (no rebuild)
+ISO               = installer environment: installer UI + install payload
+datum-install     = configure (TUI menu) + deploy (engine) to a target disk
 target setup      = machine-specific state (fstab, hostname, machine-id,
                     bootloader, permanent user) inside the target root
-firstboot         = owner-specific provisioning, live-only (live session
-                    account creation before greetd)
-desktop session   = greetd -> tuigreet -> authenticated user ->
-                    dbus-run-session start-datum -> start-hyprland -> Hyprland
+installed system  = greetd -> tuigreet -> PAM user -> start-hyprland
+                    -> Hyprland desktop (no installer, no live state)
 ```
 
-The ISO already contains a prepared system, so installation is a
-copy-and-configure deployment, never a package rebuild. No network fetch
-happens during install.
+The live ISO is NOT a desktop, NOT a login environment, and does NOT
+create any user. It boots straight into the installer, which owns tty1.
+The ISO already contains the prepared system (SquashFS), so installation
+is a copy-and-configure deployment, never a package rebuild and never a
+network download of the OS.
 
 ## 2. Omarchy study (what was adopted, rejected, adapted)
 
-Read: omarchy-iso README/architecture, getting-started and
-unattended-installs manuals.
+Studied: omarchy-iso (quattro branch) README and architecture.
 
-Adopted:
-- ISO ships the installer; install runs target setup in a chroot, creates
-  the user, and validates before reboot.
+Adopted principles:
+- The ISO ships a configurator as its primary UI; install runs target
+  setup in a chroot, creates the user, and validates before reboot.
+- Configuration is collected first, then executed (configurator output
+  acts as installer state; Emergence keeps it in-process: the TUI fills
+  the same variables the engine consumes).
 - Explicit destructive confirmation with disk model/size/plan shown first.
 - Staged progress with real stage names, never fake percentages.
-- User-facing error plus log-file diagnostics split.
-- Detailed installer log without credentials.
+- User-facing error plus log-file diagnostics split; detailed installer
+  log without credentials.
 - Target self-validation (fstab UUIDs, bootloader, user, services,
   live-state removal) before declaring success.
-- cidata-style unattended path is architecturally reserved (config-driven,
-  password-hash based) but NOT implemented in v0.1.2; the CLI flags plus
-  EMERGENCE_INSTALL_PASSWORD remain the automation seam.
-- "Prepare for another owner" is supported structurally: the installer
-  creates the permanent account, and live-firstboot state never leaks into
-  the target, so imaging-then-handoff does not embed a personal account.
+- Offline install from the bundled payload (Omarchy: bundled mirror;
+  Emergence: ISO SquashFS). No network fetch of the OS during install.
+- cidata-style unattended installs are architecturally reserved
+  (config-driven, password-hash based) but NOT implemented; the CLI flags
+  plus EMERGENCE_INSTALL_PASSWORD remain the automation seam for tests.
+- Acceptance testing drives the REAL interactive flow (Omarchy: QMP
+  screendump+OCR; Emergence: serial markers + QEMU monitor typing).
 
 Rejected / deferred:
 - Arch-style online package installation: unnecessary; Catalyst already
   built the system.
-- Full-disk encryption in v0.1.2: full-disk ext4 + ESP is the excellent
-  path; encryption and dual-boot are explicit non-goals for this milestone.
+- Full-disk encryption: full-disk ext4 + ESP is the supported path;
+  encryption and dual-boot are explicit non-goals for this milestone.
+  The architecture supports exactly one reliable full-disk install; dual
+  boot can be added later without rewriting it.
 - Graphical toolkit installer: the product is a terminal OS; the TUI is
-  restrained monochrome box-drawing over the existing shell flow.
-- Omarchy's bundled-mirror + pacman model: Gentoo/Catalyst model differs.
+  restrained monochrome box-drawing over a POSIX sh flow.
+- Omarchy's bundled-mirror + pacman model: Gentoo/Catalyst model differs
+  (tar copy of the prepared root instead of pacstrap/archinstall).
 
 Adapted (Gentoo-specific):
-- tar copy of the live root (one filesystem, excluding virtual dirs)
-  instead of pacstrap/archinstall.
 - GRUB UEFI with NVRAM entry (best effort) plus mandatory removable
-  BOOTX64.EFI fallback.
+  BOOTX64.EFI fallback; UUID-enforced root; quiet target cmdline.
 - systemd machine-id regeneration, NetworkManager/greetd enablement,
   PipeWire socket activation carried over via the image.
+- Console keymap applied live with loadkeys, persisted to
+  /etc/vconsole.conf, and mapped to the Hyprland kb_layout.
 
-## 3. User lifecycle (identities never blur)
+## 3. Why firstboot account creation was removed
 
-- root: runs firstboot and the installer only; never runs the desktop.
-- greetd/greeter: owns the login prompt process only; never the session.
-- live-session user: created interactively by datum-firstboot-live, recorded
-  in /run/datum-live-user (authoritative) and /etc/datum/live-user
-  (persistent copy for the installer). Live-only; removed from the target.
+The previous architecture booted the ISO into a live-user creation form
+(firstboot), then a greeter login, then a live Hyprland desktop, and only
+then could the user install. That made the ISO simultaneously an
+installer, a desktop, and a login environment, which caused:
+
+- systemd status mixing with the setup form (shared VT, no ownership);
+- start-job text over tuigreet (probe in the boot transaction);
+- a live account lifecycle (markers, adoption, cleanup) that could leak
+  into the target;
+- greetd/firstboot fighting over tty1;
+- Hyprland tested on the live path, where virtual GPUs are fragile (see
+  section 6), blocking installation behind compositor health.
+
+The installer-first design deletes all of it: no live user, no live
+greeter, no live desktop. The TUI collects the TARGET owner's account
+before partitioning, the engine creates exactly one permanent user on
+the target, and the installed system logs in through tuigreet + PAM.
+
+## 4. User lifecycle (only two identities exist)
+
+- root (live): runs the installer only; never runs a desktop.
 - target permanent user: created by datum-install inside the target root
-  (adopted if the name matches the live user, otherwise the live account
-  is deleted entry-by-entry). The installed system autologs this user via
-  an appended greetd [initial_session]; the live image carries none.
-- No default password, no hardcoded permanent user, no root desktop.
+  (useradd -m from /etc/skel, fixed groups, installed password). The
+  installed system has NO autologin: tuigreet + PAM authenticate this
+  user on every boot.
+- No live user, no emergence account, no default password, no root
+  desktop, no hardcoded permanent user.
 
-## 4. Live/target classification
+## 5. Live/target classification
 
-- ISO-only: datum-firstboot-live (+ unit), /etc/datum/live-user,
-  /run/datum-live-user, installer log at /var/log/emergence-installer.log
-  (a sanitized copy is also left on the target for diagnostics).
-- Target-only: [initial_session] autologin block, UUID fstab, installed
-  machine-id, permanent user password.
+- ISO-only: datum-installer.service, datum-install (TUI+engine),
+  datum-diagnose, /etc/datum/live, installer log.
+- Target-only: /etc/datum/installed, UUID fstab, installed machine-id,
+  permanent user + password, quiet GRUB cmdline, tuigreet login.
 - Both (copied then reconfigured): kernel/initramfs, GRUB, greetd base
-  config, desktop overlay, /etc/skel rice.
+  config (default_session only), desktop overlay, /etc/skel rice,
+  datum-boot-probe (observes both), datum-diagnose.
 
-## 5. Hyprland launch (root cause of the VirtualBox report)
+## 6. Hyprland root cause (established by experiment, 2026-09-29)
 
-The image ships /usr/bin/start-hyprland (watchdog binary) alongside
-/usr/bin/Hyprland. start-datum previously exec'd Hyprland directly, which
-produces the "launched without start-hyprland" warning and loses watchdog
-supervision. start-datum now execs `start-hyprland -- --config ...` with a
-direct-Hyprland fallback. All config-referenced binaries (kitty, wofi,
-waybar, dunst, hyprpaper, polkit agent, screenshot/record helpers,
-wallpaper, power.sh) were verified present in the shipped squashfs, so the
-remaining "No such file or directory" in the VirtualBox report is an
-environment/session issue (XDG_RUNTIME_DIR, D-Bus, GPU/KMS), not a missing
-payload file; QEMU reports Hyprland=yes with a Wayland socket. VirtualBox
-remains NOT TESTED in this environment (no VirtualBox available).
+Symptom: compositor starts, then exits; session returns to tuigreet.
+A direct TTY launch also failed, proving greetd was not the sole cause.
 
-## 6. Testing contract
+Matrix run on the v0.1.4 ISO (Hyprland 0.56.2, same image, same
+firstboot/login path, same rice config throughout):
 
-- tests/validate.sh: static contracts (spec compression, greetd, firstboot
-  markers, installer lifecycle strings, start-hyprland usage, log path).
-- scripts/test-iso.sh --firstboot: real firstboot typing + tuigreet login +
-  probe verdict, with password-secrecy assertion.
-- scripts/test-firstboot-checks.sh: invalid users, password mismatch rules.
-- scripts/test-install.sh: blank-disk install + host-side target checks +
-  installed-disk boot probe (fstab UUIDs, bootloader, live-user removal,
-  Hyprland session).
-- The "create user, login, Hyprland exits, back to tuigreet" failure is a
-  regression case covered by the Hyprland=yes probe assertion; a future
-  VirtualBox run must drive the same lifecycle there.
+- QEMU std VGA (bochs-drm binds, /dev/dri/card0 present): Hyprland
+  RUNS, Wayland socket exists, monitor detected (also with virtio-gpu).
+- QEMU vmware VGA (vmwgfx refuses the hypervisor: "probe failed with
+  error -38", NO /dev/dri at all): Hyprland SIGABRTs (coredump,
+  signal 6), no socket, no hyprland.log — with the full rice config AND
+  with a 6-line minimal config.
 
-## 7. Quiet boot and VT ownership (Failures A/B fix)
+Conclusion: Hyprland 0.56.2 aborts at startup when the system presents
+zero DRM devices. Case closed as graphics-environment-specific: NOT
+greetd, NOT PAM, NOT XDG_RUNTIME_DIR (correct in all runs), NOT D-Bus,
+NOT start-hyprland (command line verified in the coredump), NOT the
+rice (minimal config fails identically), NOT missing libraries (ldd
+clean), NOT permissions (video/render groups present). The scheduling
+("Failed to change process scheduling strategy") warning is non-fatal
+best-effort output, not the cause. The user-visible VirtualBox failure
+is a different symptom (late clean exit on VMSVGA, untestable here: no
+VirtualBox in this environment) and must be diagnosed separately on
+hardware or VirtualBox with datum-diagnose.
 
-- `livecd/bootargs` ships `quiet loglevel=3 systemd.show_status=no
-  rd.systemd.show_status=no udev.log_level=3`, so systemd/dracut status never
-  mixes with the firstboot form or prints start-job lines over tuigreet.
-  Probe/firstboot markers still reach CI via explicit writes to /dev/kmsg and
-  /dev/ttyS0, never via kernel console output.
-- `datum-firstboot-live.service` orders after `systemd-vconsole-setup`, owns
-  tty1 (Conflicts/Before), and the script does `chvt 1` + VT reset + clear
-  before painting, and clears tty1 again before handing off to greetd.
-- `datum-boot-probe.service` observes from the side: nothing orders greetd or
-  the session After it, `StandardOutput=null` + quiet cmdline keep it off
-  tty1, and `TimeoutStartSec` bounds its polls. It writes only to the
-  journal, /run/datum-boot-probe.result, /dev/kmsg and /dev/ttyS0.
-- `greetd` uses `vt = 1` + `switch = true` so exactly one process owns the
-  visible VT in each phase: firmware/GRUB -> quiet boot -> firstboot ->
-  tuigreet -> Hyprland.
+Consequences for the product:
+- The live ISO must not depend on a working compositor (it no longer
+  starts one at all).
+- The installed desktop requires real DRM (physical hardware or a VM
+  GPU that binds: bochs/virtio-gpu proven; vmware-SVGA-on-QEMU and
+  untested VMSVGA are out of scope for automated acceptance).
+- datum-diagnose ships on live and installed systems so any future
+  compositor failure can be captured the same way (session, env,
+  runtime dir, lspci, /dev/dri, binaries, pgrep, sockets, coredumps,
+  journals, config path).
 
-## 8. Guided installer (Omarchy principles, Gentoo way)
+## 7. Boot flow (one VT owner per phase)
 
-- `datum-install` with no `--disk` on a terminal runs a guided 5-step TUI
-  (account+masked password, hostname, timezone, numbered disk menu hiding
-  live media and undersized disks, INSTALL-typed destructive confirmation,
-  staged progress, branded success screen). Pure POSIX sh, no new deps.
-- Flags + `EMERGENCE_INSTALL_PASSWORD` remain the automation seam; scripted
-  installs never enter the TUI.
+Live: firmware/GRUB -> quiet boot -> datum-installer owns tty1
+(getty@tty1 conflicted, vconsole settled, status suppressed) ->
+installer menu -> install -> success -> reboot.
+
+Installed: firmware/GRUB -> quiet boot -> greetd owns tty1
+(vt=1, switch=true) -> tuigreet -> PAM -> start-datum ->
+start-hyprland -> Hyprland desktop.
+
+datum-boot-probe observes from the side on both (journal, result file,
+kmsg, serial; stdout null; bounded polls; nothing ordered after it).
+
+## 8. Testing contract
+
+- tests/validate.sh: static contracts (spec compression, installer
+  service, no-firstboot, marker files, tuigreet-no-autologin, quiet
+  target grub, TUI/engine split, log path).
+- scripts/test-iso.sh --ci: live boot health (installer active, live
+  marker, no session, menu reached).
+- scripts/test-installer-tui.sh: real TUI drive (invalid username and
+  password-mismatch retries, disk hiding, confirmation identity check,
+  install, poweroff) + host target checks + password-secrecy assertion.
+- scripts/test-install.sh: engine path (flags) + host target checks +
+  installed-disk boot with real tuigreet login + desktop session probe
+  (Hyprland=yes, Wayland socket required).
+- The "login -> Hyprland exits -> login" regression is covered by the
+  Hyprland=yes + wayland-socket assertions on the installed boot.
+
+## 9. Build hygiene (learned the hard way)
+
+- Stage 2 ALWAYS runs fresh (guard_stage2_resume wipes unconditionally).
+  Resuming once produced a kernel-less ISO with no error: kmerge re-ran
+  against a chroot whose /boot no longer held images (the kernel emerge
+  with --update was a no-op, so installkernel never re-placed them),
+  kmerge's own tar failures are non-fatal there, and the ISO assembly
+  continued regardless.
+- validate_iso resolves EVERY grub-referenced kernel/initramfs path
+  against the ISO file list. The previous prefix check let the bad ISO
+  through: the initramfs `gentoo.igz` satisfies a naive `gentoo`
+  pattern while the kernel image itself is missing.
+- tests/validate.sh negative assertions must never use a leading `!`:
+  POSIX shells ignore `set -e` for `!`-inverted commands, so every such
+  check was silently vacant (including historic ones). Use the
+  no_match/no_file helpers instead.

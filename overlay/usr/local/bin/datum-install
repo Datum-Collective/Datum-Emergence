@@ -1,19 +1,26 @@
 #!/bin/sh
 # datum-install: install the running Datum Emergence live system to a disk.
 #
+# The live ISO is an installer environment. With no arguments on a terminal
+# this starts the guided installer (main menu, keyboard, account, hostname,
+# timezone, summary, disk, confirmation, progress, success). With flags it
+# runs non-interactively (automation/VM tests).
+#
 # Usage:
-#   sudo datum-install --disk /dev/vdX [--hostname NAME] [--user NAME]
-#                      [--timezone ZONE] [--yes] [--reboot]
+#   sudo datum-install                                   # guided installer
+#   sudo datum-install --disk /dev/vdX [--keymap X] [--hostname NAME]
+#                      [--user NAME] [--timezone ZONE] [--yes] [--reboot]
 #
 # The installer partitions the target with a GPT (512M EFI System Partition
 # + root), copies the live system with tar, writes fstab, installs GRUB for
-# UEFI (including the removable fallback), removes the live-only account the
-# firstboot setup created (it was copied over with the filesystem), creates
-# the permanent first local user, and removes live-only identity. The target
-# disk is fully overwritten.
+# UEFI (including the removable fallback), creates the permanent target user,
+# configures the target (hostname, timezone, keyboard, quiet boot, greetd),
+# strips all live-only state, and validates the target before declaring
+# success. The target disk is fully overwritten.
 #
-# Password: prompted twice on the terminal, or taken from
-# EMERGENCE_INSTALL_PASSWORD (used by automated VM installs).
+# Password: asked twice with masked input in the guided flow, or taken from
+# EMERGENCE_INSTALL_PASSWORD (automation only; never a default, never logged,
+# never passed as a process argument, never written to the target).
 set -eu
 
 PROG=datum-install
@@ -21,17 +28,43 @@ MNT=/mnt/datum-target
 ESP_SIZE_MIB=512
 MIN_DISK_MIB=10240
 LOG=/var/log/emergence-installer.log
+TUI_MODE=no
 
 info() { printf '%s: %s\n' "$PROG" "$*" >&2; }
-die() { printf '%s: error: %s\n' "$PROG" "$*" >&2; exit 1; }
+die() {
+  printf '%s: error: %s\n' "$PROG" "$*" >&2
+  log "fatal: $*"
+  # Failures must be visible on the serial console too: without this, an
+  # engine failure wedges the TUI at a pause prompt with no marker at all.
+  # die() messages never carry secrets (paths, stages, validation results).
+  kmsg "fatal: $*"
+  if test "$TUI_MODE" = yes && test -c /dev/tty; then
+    printf '\n  Press Enter to return to the installer menu.\n' > /dev/tty
+    IFS= read -r _dummy < /dev/tty || true
+  fi
+  exit 1
+}
 need() { command -v "$1" >/dev/null 2>&1 || die "required tool not found in live image: $1"; }
 # Detailed diagnostics go to the log file; the console stays a clean
-# stage/spinner view. Passwords, hashes, and the chpasswd input are never
+# stage view. Passwords, hashes, and the chpasswd input are never
 # written here: only stage names, timings, disk/filesystem operations,
 # and validation results are logged.
 log() {
   mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
   printf '%s %s: %s\n' "$(date -u +%FT%TZ 2>/dev/null || echo '?')" "$PROG" "$*" >> "$LOG" 2>/dev/null || true
+}
+# Progress markers for the journal, kernel log, and serial console (captured
+# by VM test harnesses). Values are limited to non-secret configuration
+# (step names, keymap, username, hostname, timezone, disk); passwords and
+# hashes are NEVER emitted here.
+kmsg() {
+  printf '%s\n' "Datum installer: $*" > /dev/kmsg 2>/dev/null || true
+  printf '%s\n' "Datum installer: $*" > /dev/ttyS0 2>/dev/null || true
+  logger -t datum-install -- "$*" 2>/dev/null || true
+}
+# Noisy engine commands: output to the log only, never onto the install UI.
+runlog() {
+  "$@" >>"$LOG" 2>&1 || die "command failed (see $LOG): $*"
 }
 STAGE_N=0
 STAGE_TOTAL=8
@@ -39,33 +72,40 @@ stage() {
   STAGE_N=$((STAGE_N + 1))
   info "[$STAGE_N/$STAGE_TOTAL] $*"
   log "stage $STAGE_N/$STAGE_TOTAL: $*"
+  # Stage markers on the serial console let test harnesses (and anyone
+  # watching serial) localize a stall inside the long engine run. The
+  # bracket markers "engine start"/"install success" alone leave a
+  # fifteen-minute silence between them.
+  kmsg "stage $STAGE_N/$STAGE_TOTAL: $*"
+  if test "$TUI_MODE" = yes; then
+    tui_say "  [$STAGE_N/$STAGE_TOTAL] $*"
+  fi
 }
 
 usage() {
   cat >&2 <<EOF
-usage: $PROG --disk DEVICE [--hostname NAME] [--user NAME] [--timezone ZONE] [--yes] [--reboot]
+usage: $PROG [--disk DEVICE] [--keymap MAP] [--hostname NAME] [--user NAME] [--timezone ZONE] [--yes] [--reboot]
+  (no arguments on a terminal: guided installer)
   --disk      target block device (e.g. /dev/vda). ALL DATA ON IT IS DESTROYED.
+  --keymap    console keymap (default: us)
   --hostname  installed hostname (default: emergence)
-  --user      permanent first local user (default: datum)
+  --user      permanent target user (default: datum)
   --timezone  e.g. UTC, Europe/Berlin (default: UTC)
   --yes       confirm the destructive operation (also prints the plan first)
   --reboot    reboot when finished
-
-  With no arguments and a terminal attached, $PROG starts a guided
-  installer (username, password, hostname, timezone, disk choice,
-  destructive confirmation, staged progress). Flags remain the automation
-  seam (tests, unattended installs via EMERGENCE_INSTALL_PASSWORD).
 EOF
   exit 2
 }
 
 DISK=""
+KEYMAP=us
 HOSTNAME=emergence
 NEWUSER=datum
 TIMEZONE=UTC
 CONFIRM=no
 REBOOT=no
 GAVE_DISK=no
+GAVE_KEYMAP=no
 GAVE_USER=no
 GAVE_HOST=no
 GAVE_TZ=no
@@ -73,6 +113,7 @@ GAVE_TZ=no
 while test $# -gt 0; do
   case "$1" in
     --disk) DISK=${2:?--disk needs a value}; GAVE_DISK=yes; shift 2 ;;
+    --keymap) KEYMAP=${2:?--keymap needs a value}; GAVE_KEYMAP=yes; shift 2 ;;
     --hostname) HOSTNAME=${2:?--hostname needs a value}; GAVE_HOST=yes; shift 2 ;;
     --user) NEWUSER=${2:?--user needs a value}; GAVE_USER=yes; shift 2 ;;
     --timezone) TIMEZONE=${2:?--timezone needs a value}; GAVE_TZ=yes; shift 2 ;;
@@ -83,87 +124,211 @@ while test $# -gt 0; do
   esac
 done
 
-# Guided installer: no --disk on a terminal means the human wants the full
-# Datum flow (account, hostname, timezone, disk, confirmation) instead of raw
-# flags. Automation (tests, scripts) always passes --disk, so it never lands
-# here. Pure POSIX sh, no dialog/whiptail dependency: clean screen, Datum
-# branding, masked passwords, validation with reprompts, numbered disk menu
-# that hides the live media, explicit destructive confirmation.
-if test "$GAVE_DISK" = no && test -c /dev/tty; then
-  tui_say() { printf '%s\n' "$*" > /dev/tty; }
-  tui_header() {
-    printf '\033[H\033[2J' > /dev/tty 2>/dev/null || true
-    tui_say ""
-    tui_say "  +------------------------------------------------+"
-    tui_say "  |                DATUM  EMERGENCE                |"
-    tui_say "  |                  Install system                |"
-    tui_say "  +------------------------------------------------+"
-    tui_say ""
-  }
-  tui_err() { tui_say ""; tui_say "  ! $1"; tui_say "  Please try again."; tui_say ""; }
-  tui_ask() {
-    # $1 = prompt, $2 = default. Echoes answer on stdout.
-    _p=$1; _d=$2
-    if test -n "$_d"; then printf '%s [%s]: ' "$_p" "$_d" > /dev/tty;
-    else printf '%s: ' "$_p" > /dev/tty; fi
-    IFS= read -r _a < /dev/tty || _a=""
-    if test -z "$_a"; then printf '%s' "$_d"; else printf '%s' "$_a"; fi
-  }
-  tui_ask_hidden() {
-    # $1 = prompt. Echoes answer on stdout, input masked.
-    _p=$1
-    printf '%s: ' "$_p" > /dev/tty
-    stty -echo < /dev/tty 2>/dev/null || true
-    IFS= read -r _a < /dev/tty || _a=""
-    stty echo < /dev/tty 2>/dev/null || true
-    printf '\n' > /dev/tty
-    printf '%s' "$_a"
-  }
-  valid_tui_user() {
-    case "$1" in ""|root|emergence|greeter|greetd|*[^a-z0-9_-]*|-[a-z0-9_-]*|[0-9]*) return 1;; esac
+# ---------------------------------------------------------------------------
+# Guided installer TUI (pure POSIX sh, no extra dependencies).
+# ---------------------------------------------------------------------------
+tui_say() { printf '%s\n' "$*" > /dev/tty; }
+tui_header() {
+  printf '\033[H\033[2J' > /dev/tty 2>/dev/null || true
+  tui_say ""
+  tui_say "  +------------------------------------------------+"
+  tui_say "  |                DATUM  EMERGENCE                |"
+  tui_say "  |                  Install system                |"
+  tui_say "  +------------------------------------------------+"
+  tui_say ""
+}
+tui_err() { tui_say ""; tui_say "  ! $1"; tui_say "  Please try again."; tui_say ""; }
+tui_ask() {
+  # $1 = prompt, $2 = default (optional). Echoes answer on stdout.
+  # ${2-} (not $2): several callers pass no default, and under `set -u` an
+  # unset $2 aborts the prompt instead of returning empty.
+  _p=$1; _d=${2-}
+  if test -n "$_d"; then printf '%s [%s]: ' "$_p" "$_d" > /dev/tty;
+  else printf '%s: ' "$_p" > /dev/tty; fi
+  IFS= read -r _a < /dev/tty || _a=""
+  if test -z "$_a"; then printf '%s' "$_d"; else printf '%s' "$_a"; fi
+}
+tui_ask_hidden() {
+  # $1 = prompt. Echoes answer on stdout, input masked.
+  _p=$1
+  printf '%s: ' "$_p" > /dev/tty
+  stty -echo < /dev/tty 2>/dev/null || true
+  IFS= read -r _a < /dev/tty || _a=""
+  stty echo < /dev/tty 2>/dev/null || true
+  printf '\n' > /dev/tty
+  printf '%s' "$_a"
+}
+tui_pause() {
+  printf '%s' "$1 [Enter] " > /dev/tty
+  IFS= read -r _dummy < /dev/tty || true
+}
+valid_tui_user() {
+  case "$1" in ""|root|emergence|greeter|greetd|*[^a-z0-9_-]*|-[a-z0-9_-]*|[0-9]*) return 1;; esac
+  return 0
+}
+keymaps_available() {
+  test -d /usr/share/keymaps && command -v loadkeys >/dev/null 2>&1
+}
+list_keymaps() {
+  # available console keymap names (bare names as loadkeys expects them),
+  # one per line, sorted.
+  find /usr/share/keymaps -name '*.map.gz' 2>/dev/null \
+    | sed -e 's#.*/##' -e 's#\.map\.gz$##' | sort -u
+}
+valid_keymap() {
+  list_keymaps | grep -qx "$1"
+}
+# Live-media detection for disk exclusion. $1 = whole-disk path (e.g.
+# /dev/vda). Returns 0 when the running live image lives on that disk.
+# Three independent signals: optical/rom drives are never targets, known
+# live mount points are traced back to their disk, and the engine additionally
+# refuses the booted source (see run_engine).
+is_live_disk() {
+  _d=$1
+  if test "$(lsblk -dn -o TYPE "$_d" 2>/dev/null)" = rom; then
     return 0
-  }
-  # 1/5 account + hostname + timezone.
+  fi
+  for _cand in /mnt/cdrom /run/live /run/archiso/bootmnt /run/initramfs/live; do
+    _src=$(findmnt -n -o SOURCE "$_cand" 2>/dev/null) || continue
+    test -n "$_src" || continue
+    case "$_src" in
+      "$_d"*) return 0 ;;
+    esac
+    if lsblk -ln -o PATH "$_d" 2>/dev/null | grep -qx "$_src"; then
+      return 0
+    fi
+  done
+  return 1
+}
+keymap_to_xkb() {
+  # Console keymap -> Hyprland kb_layout. Console and XKB names mostly agree;
+  # handle the known divergences, default to us.
+  case "$1" in
+    uk) printf 'gb' ;;
+    us|gb|de|fr|es|it|pt|br|ru|se|no|dk|fi|pl|cz|sk|hu|ro|tr|gr|il|jp) printf '%s' "$1" ;;
+    *) printf 'us' ;;
+  esac
+}
+
+tui_welcome() {
+  kmsg "welcome"
+  tui_header
+  tui_say "  Welcome to Datum Emergence."
+  tui_say ""
+  tui_say "  This installer deploys the Emergence system from this"
+  tui_say "  ISO onto a disk of your choice. The target disk is fully"
+  tui_say "  overwritten: you will confirm explicitly before anything"
+  tui_say "  is destroyed."
+  tui_say ""
+}
+
+tui_keyboard() {
+  if ! keymaps_available; then
+    KEYMAP=us
+    kmsg "keyboard unavailable, default us"
+    return 0
+  fi
   while true; do
     tui_header
-    tui_say "  Step 1/5: account"
-    if test "$GAVE_USER" = no; then
-      NEWUSER=$(tui_ask "  Username" "datum")
-      if ! valid_tui_user "$NEWUSER"; then tui_err "Invalid username '$NEWUSER'."; sleep 1; continue; fi
+    tui_say "  Step 1/7: keyboard"
+    tui_say ""
+    tui_say "  Available keymaps (default us):"
+    tui_say ""
+    list_keymaps | head -n 40 | sed 's/^/    /' > /dev/tty
+    _total=$(list_keymaps | wc -l)
+    if test "$_total" -gt 40; then
+      tui_say "    ... ($_total total; type any listed name)"
+    fi
+    tui_say ""
+    KEYMAP=$(tui_ask "  Keymap" "us")
+    if valid_keymap "$KEYMAP"; then
+      if loadkeys "$KEYMAP" < /dev/tty > /dev/tty 2>&1; then
+        log "live keymap applied: $KEYMAP"
+      else
+        tui_err "Could not activate '$KEYMAP' right now; it will still be installed."
+      fi
+      break
+    fi
+    tui_err "Unknown keymap '$KEYMAP'."
+    sleep 1
+  done
+}
+
+tui_account() {
+  while true; do
+    tui_header
+    tui_say "  Step 2/7: user account"
+    tui_say ""
+    tui_say "  This creates the permanent user of the installed system."
+    tui_say ""
+    NEWUSER=$(tui_ask "  Username" "datum")
+    if ! valid_tui_user "$NEWUSER"; then
+      kmsg "invalid username rejected: [$NEWUSER]"
+      tui_err "Invalid username '$NEWUSER' (a-z, 0-9, _ and -; must not start with a digit or -; reserved names refused)."
+      sleep 1
+      continue
     fi
     while true; do
       _pw1=$(tui_ask_hidden "  Password")
       _pw2=$(tui_ask_hidden "  Confirm password")
       if test -z "$_pw1"; then tui_err "Empty password rejected."; continue; fi
-      if test "$_pw1" != "$_pw2"; then tui_err "Passwords do not match."; continue; fi
+      if test "$_pw1" != "$_pw2"; then kmsg "password mismatch"; tui_err "Passwords do not match."; continue; fi
       EMERGENCE_INSTALL_PASSWORD_TUI=$_pw1
       break
     done
     break
   done
-  if test "$GAVE_HOST" = no; then
-    while true; do
-      tui_header
-      tui_say "  Step 2/5: hostname"
-      HOSTNAME=$(tui_ask "  Hostname" "emergence")
-      case "$HOSTNAME" in *[!a-zA-Z0-9-]*|"") tui_err "Invalid hostname."; sleep 1; continue;; esac
-      break
-    done
-  fi
-  if test "$GAVE_TZ" = no; then
-    while true; do
-      tui_header
-      tui_say "  Step 3/5: timezone"
-      tui_say "  Examples: UTC, Europe/Berlin, Asia/Kolkata"
-      TIMEZONE=$(tui_ask "  Timezone" "UTC")
-      if ! test -f "/usr/share/zoneinfo/$TIMEZONE"; then tui_err "Unknown timezone '$TIMEZONE'."; sleep 1; continue; fi
-      break
-    done
-  fi
-  # 4/5 disk: enumerate whole disks, hide live media + tiny devices.
+}
+
+tui_hostname() {
   while true; do
     tui_header
-    tui_say "  Step 4/5: installation disk"
+    tui_say "  Step 3/7: hostname"
+    HOSTNAME=$(tui_ask "  Hostname" "emergence")
+    case "$HOSTNAME" in *[!a-zA-Z0-9-]*|"")
+      kmsg "invalid hostname rejected"; tui_err "Invalid hostname."; sleep 1; continue ;;
+    esac
+    break
+  done
+}
+
+tui_timezone() {
+  while true; do
+    tui_header
+    tui_say "  Step 4/7: timezone"
+    tui_say "  Examples: UTC, Europe/Berlin, Asia/Kolkata"
+    TIMEZONE=$(tui_ask "  Timezone" "UTC")
+    if ! test -f "/usr/share/zoneinfo/$TIMEZONE"; then
+      kmsg "unknown timezone rejected"; tui_err "Unknown timezone '$TIMEZONE'."; sleep 1; continue
+    fi
+    break
+  done
+}
+
+tui_summary() {
+  kmsg "summary"
+  while true; do
+    tui_header
+    tui_say "  Step 5/7: summary"
+    tui_say ""
+    tui_say "  Keyboard:  $KEYMAP"
+    tui_say "  Username:  $NEWUSER"
+    tui_say "  Hostname:  $HOSTNAME"
+    tui_say "  Timezone:  $TIMEZONE"
+    tui_say "  Mode:      Full disk"
+    tui_say ""
+    _yn=$(tui_ask "  Continue, or go Back to change settings [Continue/back]")
+    case "$_yn" in
+      [Bb]*) kmsg "summary back"; return 1 ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+tui_disk() {
+  while true; do
+    tui_header
+    tui_say "  Step 6/7: installation disk"
     tui_say "  ALL DATA on the chosen disk will be destroyed."
     tui_say ""
     _i=0; _list=""
@@ -171,15 +336,13 @@ if test "$GAVE_DISK" = no && test -c /dev/tty; then
       _bytes=$(lsblk -bn -o SIZE -d "$_d" 2>/dev/null || echo 0)
       _mib=$((_bytes / 1048576))
       if test "$_mib" -lt "$MIN_DISK_MIB"; then continue; fi
-      _live=no
-      for _cand in /mnt/cdrom /run/live /run/archiso/bootmnt; do
-        if findmnt -n -o SOURCE "$_cand" 2>/dev/null | grep -q "^$_d"; then _live=yes; fi
-      done
-      if test "$_live" = yes; then continue; fi
+      if is_live_disk "$_d"; then continue; fi
       _i=$((_i + 1))
       _model=$(lsblk -dn -o MODEL "$_d" 2>/dev/null | sed 's/^ *//;s/ *$//')
       _size=$(lsblk -dn -o SIZE "$_d" 2>/dev/null | sed 's/^ *//')
+      kmsg "disk candidate [${_i}]: $_d $_size $_model"
       tui_say "  [${_i}] $_d  $_size  $_model"
+      lsblk -ln -o PATH,SIZE,FSTYPE,LABEL "$_d" 2>/dev/null | tail -n +2 | sed 's/^/        /' > /dev/tty || true
       _list="$_list $_d"
     done
     if test "$_i" -eq 0; then
@@ -188,41 +351,139 @@ if test "$GAVE_DISK" = no && test -c /dev/tty; then
     fi
     tui_say ""
     _pick=$(tui_ask "  Choose disk [1-$_i]")
-    case "$_pick" in ''|*[!0-9]*) tui_err "Enter a number 1-$_i."; sleep 1; continue;; esac
-    if test "$_pick" -lt 1 -o "$_pick" -gt "$_i" 2>/dev/null; then tui_err "Out of range."; sleep 1; continue; fi
+    case "$_pick" in ''|*[!0-9]*)
+      # Log the rejected value (length + hex): a systematic mismatch here
+      # means the prompt is receiving something other than what was typed.
+      kmsg "disk choice invalid: [$_pick] len=${#_pick} hex=$(printf '%s' "$_pick" | od -An -tx1 2>/dev/null | tr -d ' \n')"
+      tui_err "Enter a number 1-$_i."; sleep 1; continue ;;
+    esac
+    if test "$_pick" -lt 1 -o "$_pick" -gt "$_i" 2>/dev/null; then kmsg "disk choice out of range"; tui_err "Out of range."; sleep 1; continue; fi
     _n=0; for _d in $_list; do _n=$((_n + 1)); if test "$_n" = "$_pick"; then DISK=$_d; fi; done
+    kmsg "disk chosen: $DISK"
     break
   done
-  # 5/5 destructive confirmation with summary.
+}
+
+tui_confirm() {
   while true; do
     tui_header
     _dmib=$(($(lsblk -bn -o SIZE -d "$DISK" 2>/dev/null || echo 0) / 1048576))
-    tui_say "  Step 5/5: confirm"
+    _model=$(lsblk -dn -o MODEL "$DISK" 2>/dev/null | sed 's/^ *//;s/ *$//')
+    tui_say "  Step 7/7: confirm"
     tui_say ""
-    tui_say "  Disk:      $DISK"
+    tui_say "  WARNING: everything on this disk will be destroyed."
+    tui_say ""
+    tui_say "  Disk:      $DISK  (${_dmib}MiB  $_model)"
     tui_say "  Username:  $NEWUSER"
     tui_say "  Hostname:  $HOSTNAME"
     tui_say "  Timezone:  $TIMEZONE"
+    tui_say "  Keyboard:  $KEYMAP"
     tui_say ""
-    tui_say "  This will ERASE everything on $DISK (${_dmib}MiB)."
+    tui_say "  All existing partitions and data on $DISK"
+    tui_say "  will be removed. This cannot be undone."
     tui_say ""
-    _yn=$(tui_ask "  Type INSTALL to proceed, or Cancel [Cancel]")
-    if test "$_yn" = "INSTALL"; then CONFIRM=yes; break; fi
+    _yn=$(tui_ask "  Type yes to erase and install [Cancel]")
+    case "$_yn" in
+      [Yy][Ee][Ss]|[Ii][Nn][Ss][Tt][Aa][Ll][Ll]) CONFIRM=yes; break ;;
+    esac
     tui_say "  Installation cancelled; no changes were made."
-    exit 1
+    return 1
   done
+  return 0
+}
+
+tui_install_flow() {
+  tui_welcome
+  tui_pause "  Press Enter to continue."
+  while true; do
+    kmsg "configure keyboard"
+    tui_keyboard
+    kmsg "configure account"
+    tui_account
+    kmsg "configure hostname"
+    tui_hostname
+    kmsg "configure timezone"
+    tui_timezone
+    if tui_summary; then break; fi
+  done
+  kmsg "configure disk"
+  tui_disk
+  kmsg "confirm (disk=$DISK user=$NEWUSER host=$HOSTNAME tz=$TIMEZONE keymap=$KEYMAP)"
+  if ! tui_confirm; then
+    kmsg "cancelled by user"
+    EMERGENCE_INSTALL_PASSWORD_TUI=x; unset EMERGENCE_INSTALL_PASSWORD_TUI 2>/dev/null || true
+    return 1
+  fi
   if test -z "${EMERGENCE_INSTALL_PASSWORD:-}" && test -n "${EMERGENCE_INSTALL_PASSWORD_TUI:-}"; then
     EMERGENCE_INSTALL_PASSWORD=$EMERGENCE_INSTALL_PASSWORD_TUI
     export EMERGENCE_INSTALL_PASSWORD
     EMERGENCE_INSTALL_PASSWORD_TUI=x; unset EMERGENCE_INSTALL_PASSWORD_TUI
   fi
   tui_header
-  tui_say "  Installing ..."
+  tui_say "  Installing Emergence on $DISK ..."
   tui_say ""
-fi
+  return 0
+}
 
+tui_success() {
+  tui_header
+  tui_say "  +------------------------------------------------+"
+  tui_say "  |              Installation complete             |"
+  tui_say "  +------------------------------------------------+"
+  tui_say ""
+  tui_say "  Installed on $DISK (user $NEWUSER, host $HOSTNAME)."
+  tui_say "  Remove the installation ISO and boot from $DISK."
+  tui_say ""
+  _yn=$(tui_ask "  Reboot now [Yes/no]")
+  case "$_yn" in [Nn]*) return 0 ;; *) reboot ;; esac
+}
+
+tui_menu() {
+  while true; do
+    kmsg "menu"
+    tui_header
+    tui_say "  What would you like to do?"
+    tui_say ""
+    tui_say "  [1] Install Emergence"
+    tui_say "  [2] Shell (root, for inspection/repair)"
+    tui_say "  [3] Reboot"
+    tui_say "  [4] Power off"
+    tui_say ""
+    _c=$(tui_ask "  Choice [1-4]" "1")
+    case "$_c" in
+      1)
+        if tui_install_flow; then
+          run_engine
+          # Scrub the installed password from this process: it served its
+          # single chpasswd use and must not linger in the service environ.
+          EMERGENCE_INSTALL_PASSWORD=x; unset EMERGENCE_INSTALL_PASSWORD 2>/dev/null || true
+          tui_success
+        fi
+        ;;
+      2)
+        tui_say ""
+        tui_say "  Starting a root shell. Type 'exit' to return here."
+        ( exec /bin/bash < /dev/tty > /dev/tty 2>&1 ) || true
+        ;;
+      3) reboot ;;
+      4) poweroff ;;
+      *) tui_err "Enter 1-4."; sleep 1 ;;
+    esac
+  done
+}
+
+# Guided mode is dispatched at the bottom of this file, after run_engine is
+# defined: with no --disk on a terminal the menu runs, otherwise the engine
+# runs directly on the given flags. Automation always passes --disk and never
+# lands in the menu.
+
+# ---------------------------------------------------------------------------
+# Installation engine (shared by guided and automated installs).
+# ---------------------------------------------------------------------------
+run_engine() {
 test -n "$DISK" || usage
 test "$(id -u)" -eq 0 || die "run as root (e.g. with sudo)"
+kmsg "engine start (disk=$DISK user=$NEWUSER host=$HOSTNAME)"
 need sfdisk; need mkfs.vfat; need mkfs.ext4; need blkid; need lsblk
 need tar; need grub-install; need grub-mkconfig; need systemd-machine-id-setup
 need useradd; need chpasswd; need passwd; need udevadm
@@ -235,6 +496,9 @@ case "$NEWUSER" in
   ""|root|emergence|greeter|greetd|*[^a-z0-9_-]*|-[a-z0-9_-]*|[0-9]*) die "invalid username: $NEWUSER (must not be root/emergence/greeter/greetd)" ;;
 esac
 test -f "/usr/share/zoneinfo/$TIMEZONE" || die "unknown timezone: $TIMEZONE"
+if test -n "$KEYMAP" && keymaps_available; then
+  valid_keymap "$KEYMAP" || die "unknown keymap: $KEYMAP"
+fi
 test -b "$DISK" || die "not a block device: $DISK"
 
 # Refuse targets that are obviously wrong.
@@ -247,8 +511,12 @@ for part in $(lsblk -ln -o PATH "$DISK" 2>/dev/null | tail -n +2); do
     die "refusing: $part (on $DISK) is currently mounted"
   fi
 done
-# Refuse the device the live ISO itself booted from (best effort).
-for cand in /mnt/cdrom /run/live /run/archiso/bootmnt; do
+# Refuse the device the live ISO itself booted from (best effort, plus the
+# optical-drive rule which needs no mount topology to hold).
+if is_live_disk "$DISK"; then
+  die "refusing: $DISK provides the running live image"
+fi
+for cand in /mnt/cdrom /run/live /run/archiso/bootmnt /run/initramfs/live; do
   if findmnt -n -o SOURCE "$cand" >/dev/null 2>&1; then
     live_src=$(findmnt -n -o SOURCE "$cand")
     case "$live_src" in
@@ -260,12 +528,13 @@ done
 DISK_MIB=$(($(lsblk -bn -o SIZE -d "$DISK") / 1048576))
 test "$DISK_MIB" -ge "$MIN_DISK_MIB" || die "$DISK is only ${DISK_MIB}MiB (need >= ${MIN_DISK_MIB}MiB)"
 
-log "install started: disk=$DISK size_mib=$DISK_MIB hostname=$HOSTNAME user=$NEWUSER timezone=$TIMEZONE"
+log "install started: disk=$DISK size_mib=$DISK_MIB keymap=$KEYMAP hostname=$HOSTNAME user=$NEWUSER timezone=$TIMEZONE"
 info "plan:"
 info "  disk:     $DISK (${DISK_MIB}MiB) -- ALL DATA WILL BE DESTROYED"
 info "  layout:   GPT: p1 ${ESP_SIZE_MIB}MiB ESP (FAT32), p2 rest root (ext4)"
+info "  keymap:   $KEYMAP"
 info "  hostname: $HOSTNAME"
-info "  user:     $NEWUSER (any live-session account is removed from the target)"
+info "  user:     $NEWUSER (target-only account)"
 info "  timezone: $TIMEZONE"
 info "  boot:     GRUB x86_64-efi (NVRAM entry + removable fallback)"
 info "  log:      $LOG (detailed diagnostics; never contains passwords)"
@@ -297,7 +566,7 @@ fi
 # sfdisk 2.42 rejects MBR codes like 83 on GPT labels.
 stage "Preparing disk $DISK (GPT, 512MiB ESP + root)"
 log "partitioning $DISK"
-sfdisk --wipe always "$DISK" <<EOF
+runlog sfdisk --wipe always "$DISK" <<EOF
 label: gpt
 unit: sectors
 start=2048, size=1048576, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B
@@ -305,7 +574,7 @@ start=1050624, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4
 EOF
 # Wait for partition nodes with or without a running udev daemon (the
 # installer also runs from minimal shells where udevadm has no daemon).
-partx -u "$DISK" 2>/dev/null || true
+runlog partx -u "$DISK" >>"$LOG" 2>&1 || true
 udevadm settle 2>/dev/null || sleep 2
 ESP=${DISK}1
 ROOTP=${DISK}2
@@ -322,8 +591,8 @@ test -b "$ROOTP" || die "root partition did not appear: $ROOTP"
 log "partitions ready: ESP=$ESP ROOT=$ROOTP"
 
 stage "Formatting filesystems (FAT32 ESP, ext4 root)"
-mkfs.vfat -F 32 -n DATUM_EFI "$ESP"
-mkfs.ext4 -q -L datum-root -F "$ROOTP"
+runlog mkfs.vfat -F 32 -n DATUM_EFI "$ESP"
+runlog mkfs.ext4 -q -L datum-root -F "$ROOTP"
 log "filesystems created"
 
 stage "Installing Emergence (copying live system)"
@@ -348,7 +617,8 @@ tar -C / --one-file-system \
   --exclude=./dev/* --exclude=./proc/* --exclude=./sys/* \
   --exclude=./tmp/* --exclude=./run/* --exclude=./mnt/* --exclude=./media/* \
   --exclude=./lost+found \
-  -cf - . | tar -C "$MNT" -xpf -
+  -cf - . 2>>"$LOG" | tar -C "$MNT" -xpf - 2>>"$LOG" \
+  || die "system copy failed (see $LOG)"
 mkdir -p "$MNT/dev" "$MNT/proc" "$MNT/sys" "$MNT/run" "$MNT/tmp" "$MNT/mnt" "$MNT/media"
 chmod 1777 "$MNT/tmp"
 
@@ -374,7 +644,7 @@ cp -f /etc/resolv.conf "$MNT/etc/resolv.conf" 2>/dev/null || true
 
 target() { chroot "$MNT" /bin/sh -c "$1"; }
 
-stage "Configuring system (hostname, timezone, machine identity)"
+stage "Configuring system (hostname, timezone, keyboard, machine identity)"
 log "copy finished; writing fstab and host identity"
 info "configuring installed system ..."
 printf '%s\n' "$HOSTNAME" > "$MNT/etc/hostname"
@@ -385,103 +655,51 @@ cat > "$MNT/etc/hosts" <<EOF
 EOF
 # Fresh machine identity (never carry the live session's over).
 rm -f "$MNT/etc/machine-id" "$MNT/var/lib/dbus/machine-id"
-target "systemd-machine-id-setup"
+runlog target "systemd-machine-id-setup"
 log "machine-id regenerated"
-stage "Creating user $NEWUSER (live-only identity removed from target)"
-# Live-only account cleanup. Booting the live ISO runs datum-firstboot-live,
-# which creates the account the user chose and records it in
-# /etc/datum/live-user (persistent, so it is copied onto the target by the
-# tar step above) and /run/datum-live-user (runtime only). That account must
-# not survive on the target: the installed system gets exactly one permanent
-# user, created below.
-#
-# userdel cannot do this removal: the live session currently runs as that
-# UID, so userdel would refuse (and it could touch the live account DBs
-# instead of the target's). The target databases are plain text and no live
-# process depends on the target copies, so edit them directly.
-LIVE_USER=""
-for marker in /etc/datum/live-user /run/datum-live-user; do
-  if test -f "$marker"; then
-    u=$(tr -d '[:space:]' < "$marker" 2>/dev/null || true)
-    if test -n "$u"; then
-      if test -z "$LIVE_USER"; then
-        LIVE_USER=$u
-      elif test "$u" != "$LIVE_USER"; then
-        die "conflicting live-user markers: '$LIVE_USER' vs '$u' in $marker"
-      fi
-    fi
-  fi
-done
-case "$LIVE_USER" in
-  ""|root|emergence|greeter|greetd|*[^a-z0-9_-]*|-[a-z0-9_-]*|[0-9]*)
-    if test -n "$LIVE_USER"; then
-      die "live-user marker names an unusable account: '$LIVE_USER'"
-    fi ;;
-esac
-if test -n "$LIVE_USER" && test "$LIVE_USER" != "$NEWUSER"; then
-  info "removing live-only user '$LIVE_USER' from target ..."
-  for f in passwd shadow gshadow; do
-    if test -f "$MNT/etc/$f"; then
-      grep -v "^$LIVE_USER:" "$MNT/etc/$f" > "$MNT/etc/$f.tmp" || true
-      cat "$MNT/etc/$f.tmp" > "$MNT/etc/$f"
-      rm -f "$MNT/etc/$f.tmp"
-    fi
-  done
-  if test -f "$MNT/etc/group"; then
-    # Strip the user from supplementary member lists, then drop a group
-    # literally named after the user if left memberless. The shared primary
-    # group (users) is untouched. (Marker names match [a-z0-9_-]; GNU \b.)
-    sed -i -e "s/\b$LIVE_USER\b//g" -e 's/,,*/,/g' -e 's/:,/:/' -e 's/,$//' "$MNT/etc/group"
-    sed -i "/^$LIVE_USER:[^:]*:[0-9][0-9]*:$/d" "$MNT/etc/group"
-  fi
-  rm -rf "$MNT/home/$LIVE_USER" "$MNT/var/mail/$LIVE_USER" "$MNT/var/spool/mail/$LIVE_USER"
-elif test -n "$LIVE_USER"; then
-  info "live user '$LIVE_USER' matches the requested installed user; adopting the account ..."
+# Console keyboard persists on the target; the graphical layout follows
+# below when it differs from us.
+if test -n "$KEYMAP"; then
+  printf 'KEYMAP=%s\n' "$KEYMAP" > "$MNT/etc/vconsole.conf"
+  log "target keymap: $KEYMAP"
 fi
-# The marker is live-only state and must never survive into the installed system.
-rm -f "$MNT/etc/datum/live-user"
-rmdir "$MNT/etc/datum" 2>/dev/null || true
-# The image ships no preset human accounts, so any remaining UID >= 1000
-# entry on the target (other than the requested user) is unexpected live
-# state: refuse to guess instead of silently inheriting it. (65534/nobody
-# is not a human account.)
+
+stage "Creating user $NEWUSER (target-only account)"
+# The live ISO never creates any user: there is no live account to inherit,
+# adopt, or clean up. The image ships no UID >= 1000 accounts, so any such
+# entry on the target (other than the requested user) is unexpected state:
+# refuse to guess instead of silently inheriting it. (65534/nobody is not a
+# human account.)
 STRAY_USERS=$(awk -F: '$3 >= 1000 && $3 != 65534 {print $1}' "$MNT/etc/passwd" 2>/dev/null || true)
 for stray in $STRAY_USERS; do
   if test "$stray" != "$NEWUSER"; then
-    die "unexpected UID>=1000 account '$stray' on target (live state?); refusing to inherit it"
+    die "unexpected UID>=1000 account '$stray' on target; refusing to inherit it"
   fi
 done
 for g in wheel users audio video render input plugdev; do
-  target "getent group $g >/dev/null || groupadd -r $g"
+  runlog target "getent group $g >/dev/null || groupadd -r $g"
 done
 if target "id $NEWUSER >/dev/null 2>&1"; then
-  # Only the adopted live account may already exist here (anything else died
-  # in the stray check above). Keep its home, fix groups/shell/ownership,
-  # and set the installed password below.
-  info "using existing '$NEWUSER' account from live session ..."
-  target "usermod -s /bin/bash -g users -G wheel,users,audio,video,render,input,plugdev $NEWUSER"
-  target "chown -R $NEWUSER:users /home/$NEWUSER"
-else
-  target "useradd -m -s /bin/bash -G wheel,users,audio,video,render,input,plugdev $NEWUSER"
+  die "account '$NEWUSER' already exists on the target; refusing to reuse it"
 fi
-printf '%s:%s\n' "$NEWUSER" "$NEW_PASSWORD" | target "chpasswd"
+runlog target "useradd -m -s /bin/bash -G wheel,users,audio,video,render,input,plugdev $NEWUSER"
+printf '%s:%s\n' "$NEWUSER" "$NEW_PASSWORD" | runlog target "chpasswd"
 NEW_PASSWORD=x; unset NEW_PASSWORD
-log "permanent user password set (value never logged)"
-target "passwd -l root || true"
-# Installed systems autologin the permanent user: the live image carries no
-# [initial_session] section (firstboot creates the account before greetd
-# starts), so append one for the installed user. tuigreet stays as the
-# fallback greeter. Match the section header exactly: the live config
-# contains a comment mentioning initial_session.
-if grep -q '^\[initial_session\]' "$MNT/etc/greetd/config.toml"; then
-  die "unexpected initial_session in target greetd config"
+log "target user password set (value never logged)"
+runlog target "passwd -l root || true"
+# Graphical keyboard layout follows the console keymap when it diverges
+# from us (the rice default). Both the new user's config and /etc/skel
+# (for any later users) are updated; nothing else in the rice is touched.
+XKB=$(keymap_to_xkb "$KEYMAP")
+if test "$XKB" != us; then
+  for cfg in "$MNT/home/$NEWUSER/.config/hypr/hyprland.lua" "$MNT/etc/skel/.config/hypr/hyprland.lua"; do
+    if test -f "$cfg"; then
+      sed -i 's/kb_layout = "us"/kb_layout = "'"$XKB"'"/' "$cfg"
+      log "kb_layout set to $XKB in target $cfg"
+    fi
+  done
 fi
-cat >> "$MNT/etc/greetd/config.toml" <<EOF
-
-[initial_session]
-command = "dbus-run-session /usr/local/bin/start-datum"
-user = "$NEWUSER"
-EOF
+runlog target "chown -R $NEWUSER:users /home/$NEWUSER"
 # Timezone.
 ln -sf "/usr/share/zoneinfo/$TIMEZONE" "$MNT/etc/localtime"
 log "timezone set to $TIMEZONE"
@@ -493,11 +711,22 @@ stage "Installing bootloader (GRUB UEFI + removable fallback)"
 # firmware without a registered entry (many VMs, some boards). The NVRAM
 # entry is best-effort so installs also succeed where efivars is unavailable.
 test -e "$MNT"/boot/vmlinuz-* || die "no kernel in target /boot; refusing to leave an unbootable system"
-target "grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --recheck"
-if ! target "grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=datum --recheck"; then
+runlog target "grub-install --target=x86_64-efi --efi-directory=/boot/efi --removable --recheck"
+if ! target "grub-install --target=x86_64-efi --efi-directory=/boot/efi --bootloader-id=datum --recheck" >>"$LOG" 2>&1; then
   info "NVRAM boot entry could not be registered; removable fallback installed"
 fi
-target "grub-mkconfig -o /boot/grub/grub.cfg"
+# The installed system boots like the live ISO: quiet, no status spam on the
+# login VT (greetd owns it). Diagnostics remain in the journal.
+if test -f "$MNT/etc/default/grub"; then
+  if grep -q '^GRUB_CMDLINE_LINUX=' "$MNT/etc/default/grub"; then
+    sed -i 's/^GRUB_CMDLINE_LINUX=.*/GRUB_CMDLINE_LINUX="quiet loglevel=3 systemd.show_status=no rd.systemd.show_status=no udev.log_level=3"/' "$MNT/etc/default/grub"
+  else
+    printf '%s\n' 'GRUB_CMDLINE_LINUX="quiet loglevel=3 systemd.show_status=no rd.systemd.show_status=no udev.log_level=3"' >> "$MNT/etc/default/grub"
+  fi
+else
+  printf '%s\n' 'GRUB_CMDLINE_LINUX="quiet loglevel=3 systemd.show_status=no rd.systemd.show_status=no udev.log_level=3"' > "$MNT/etc/default/grub"
+fi
+runlog target "grub-mkconfig -o /boot/grub/grub.cfg"
 # grub-mkconfig falls back to unstable device names (root=/dev/...) when it
 # cannot resolve UUIDs (no udev, unusual topologies). Device names shift
 # across boots (USB media added/removed), so enforce the UUID root that the
@@ -509,14 +738,27 @@ fi
 
 # Installed system keeps the intended services (symlinks were copied over,
 # but re-enable to be certain they resolve on the target). The live
-# first-boot wizard must never run here: the installer created the permanent
-# user instead, so its unit and script are removed from the target outright
-# (disabling alone would leave live-only files behind).
-stage "Configuring desktop session (greetd, NetworkManager, firstboot cleanup)"
-target "systemctl enable NetworkManager.service greetd.service"
-target "systemctl disable datum-firstboot-live.service"
-rm -f "$MNT/etc/systemd/system/datum-firstboot-live.service" \
-  "$MNT/usr/local/bin/datum-firstboot-live"
+# installer must never run on the target: disable its unit and remove the
+# installer machinery outright (disabling alone would leave live-only files
+# behind). The installed login is always tuigreet + real PAM
+# authentication: no initial_session autologin is ever configured.
+stage "Configuring desktop session (greetd, NetworkManager, live-state cleanup)"
+runlog target "systemctl enable NetworkManager.service greetd.service"
+if grep -q '^\[initial_session\]' "$MNT/etc/greetd/config.toml"; then
+  die "unexpected initial_session in target greetd config"
+fi
+if ! grep -q '^\[default_session\]' "$MNT/etc/greetd/config.toml"; then
+  die "target greetd config has no default (tuigreet) session"
+fi
+runlog target "systemctl disable datum-installer.service"
+rm -f "$MNT/etc/systemd/system/datum-installer.service" \
+  "$MNT/usr/local/bin/datum-install"
+# Live/install separation markers: the live ISO carries /etc/datum/live;
+# the target carries /etc/datum/installed instead. A lingering live marker
+# on the target means live identity leaked into the installation.
+rm -f "$MNT/etc/datum/live" "$MNT/etc/datum/live-user"
+mkdir -p "$MNT/etc/datum"
+printf 'installed\n' > "$MNT/etc/datum/installed"
 
 stage "Validating installation (target self-check before reboot)"
 validate_target() {
@@ -544,19 +786,28 @@ validate_target() {
   vcheck "machine-id present" test -s "$t/etc/machine-id"
   vcheck "hostname correct" grep -qx "$HOSTNAME" "$t/etc/hostname"
   vcheck "timezone link" test -L "$t/etc/localtime"
+  vcheck "vconsole keymap" grep -qx "KEYMAP=$KEYMAP" "$t/etc/vconsole.conf"
+  vcheck "quiet boot configured" grep -q 'systemd.show_status=no' "$t/etc/default/grub"
   vcheck "kernel present" ls "$t"/boot/vmlinuz-*
   vcheck "GRUB config present" test -f "$t/boot/grub/grub.cfg"
   vcheck "GRUB UUID root" grep -Eq "root=UUID=$ROOT_UUID" "$t/boot/grub/grub.cfg"
   vcheck "removable bootloader" test -f "$t/boot/efi/EFI/BOOT/BOOTX64.EFI"
   vcheck "greetd config present" test -f "$t/etc/greetd/config.toml"
-  vcheck "installed autologin user" grep -q "user = \"$NEWUSER\"" "$t/etc/greetd/config.toml"
+  vcheck "tuigreet default session" grep -q '^\[default_session\]' "$t/etc/greetd/config.toml"
+  vcheck "no initial_session autologin" test -z "$(grep '^\[initial_session\]' "$t/etc/greetd/config.toml" || true)"
   vcheck "target user exists" grep -q "^$NEWUSER:" "$t/etc/passwd"
   vcheck "target home exists" test -d "$t/home/$NEWUSER"
+  # Numeric UID comparison: names resolve against the RUNNING system's user
+  # database (live ISO or test host), never the target's, so a name check
+  # compares against the wrong namespace. UIDs are unambiguous.
+  _want_uid=$(awk -F: -v u="$NEWUSER" '$1==u{print $3}' "$t/etc/passwd")
+  vcheck "target home owned by user" test "$(stat -c %u "$t/home/$NEWUSER" 2>/dev/null)" = "$_want_uid"
   vcheck "desktop launcher present" test -x "$t/usr/local/bin/start-datum"
-  vcheck "hyprland config present" test -f "$t/etc/skel/.config/hypr/hyprland.lua"
-  vcheck "live marker removed" test "!" -e "$t/etc/datum/live-user"
-  vcheck "live firstboot unit removed" test "!" -e "$t/etc/systemd/system/datum-firstboot-live.service"
-  vcheck "live firstboot script removed" test "!" -e "$t/usr/local/bin/datum-firstboot-live"
+  vcheck "hyprland config present" test -f "$t/home/$NEWUSER/.config/hypr/hyprland.lua"
+  vcheck "installed marker present" test -e "$t/etc/datum/installed"
+  vcheck "live marker removed" test "!" -e "$t/etc/datum/live"
+  vcheck "live installer unit removed" test "!" -e "$t/etc/systemd/system/datum-installer.service"
+  vcheck "live installer binary removed" test "!" -e "$t/usr/local/bin/datum-install"
   if test "$vfail" -ne 0; then
     die "target validation failed; see $LOG. The disk was written but is NOT declared good."
   fi
@@ -564,6 +815,7 @@ validate_target() {
 }
 validate_target "$MNT"
 log "install finished: user=$NEWUSER host=$HOSTNAME disk=$DISK"
+kmsg "install success (user=$NEWUSER host=$HOSTNAME disk=$DISK)"
 # Leave a sanitized copy of the install log on the target for post-install
 # diagnostics (it never contains passwords or hashes by construction).
 mkdir -p "$MNT/var/log" 2>/dev/null || true
@@ -573,13 +825,22 @@ info "unmounting ..."
 trap - EXIT INT TERM
 umount -R "$MNT"
 rmdir "$MNT" 2>/dev/null || true
-if test -c /dev/tty && test "$GAVE_DISK" = no; then
-  printf '\033[H\033[2J' > /dev/tty 2>/dev/null || true
-  printf '%s\n' "" "  +------------------------------------------------+" "  |                DATUM  EMERGENCE                |" "  |              Installation complete             |" "  +------------------------------------------------+" "" "  Installed on $DISK (user $NEWUSER, host $HOSTNAME)." "  Remove the live ISO and boot from $DISK." "" > /dev/tty
-fi
 info "installed Datum Emergence on $DISK (user $NEWUSER, host $HOSTNAME)."
 info "remove the live ISO and boot from $DISK."
 if test "$REBOOT" = yes; then
   info "rebooting ..."
   reboot
 fi
+} # end run_engine
+
+# Dispatch: guided menu on an interactive terminal without flags, otherwise
+# the engine on the given flags.
+if test "$GAVE_DISK" = no && test -c /dev/tty; then
+  TUI_MODE=yes
+  export TUI_MODE
+  tui_menu
+  exit 0
+fi
+
+# Automated (flags) path: the TUI menu already ran the engine itself.
+run_engine

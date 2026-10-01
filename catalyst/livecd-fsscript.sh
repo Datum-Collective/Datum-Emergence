@@ -2,29 +2,29 @@
 set -eu
 
 # This executes inside Catalyst's completed live root, after the root overlay.
-# Enable only the services that are part of the intended live desktop.
+# The live ISO is an installer environment (not a live desktop): the only
+# user-facing service is the guided installer on tty1.
 systemctl enable NetworkManager.service
-# The live user is created interactively by datum-firstboot-live, which then
-# starts greetd itself. greetd stays disabled in the image on purpose: if it
-# were enabled it would race firstboot and present a login screen before any
-# valid account exists (previously papered over with a locked autologin
-# account that left no usable credential path on failure).
+# No greeter on the live ISO: there is no live user to log in, and the
+# installer (not a desktop session) is the product. The installed target
+# gets greetd enabled by datum-install during installation.
 systemctl disable greetd.service
-systemctl enable datum-firstboot-live.service
-# Boot self-check: reports systemd/services/session/Hyprland status to the
-# journal and the serial console. Used by automated QEMU boot validation.
+# The installer owns tty1 from boot (conflicts with getty@tty1 itself).
+systemctl enable datum-installer.service
+# Boot self-check: reports systemd/service/session status to the journal and
+# the serial console. Bounded and non-blocking (never orders anything after
+# it; quiet cmdline suppresses status display). Used by automated QEMU boot
+# validation on live and installed systems.
 systemctl enable datum-boot-probe.service
 # PipeWire is socket-activated per user; the session manager is a user
-# service. Neither is on by default, so without this the live session (and
-# any installed system copied from it) has no audio. --global applies to the
-# live user and to any user the installer creates later.
+# service. Neither is on by default, so without this the installed desktop
+# (copied from this image) has no audio. --global applies to the user the
+# installer creates on the target.
 systemctl --global enable pipewire.socket pipewire-pulse.socket wireplumber.service
 
-# No preset live account is created here. Catalyst's livecdfs-update only
+# No live account of any kind is created here. Catalyst's livecdfs-update only
 # creates live users for gentoo-release-* types; for generic-livecd no
-# account is created, and that is what we want: datum-firstboot-live creates
-# the real interactive live user at boot (with password, groups, and a home
-# from /etc/skel via useradd -m). A hardcoded locked account previously left
-# no usable credential path whenever autologin failed, so it is gone.
+# account is created, and that is what we want: the ISO never logs anyone
+# in. The permanent user is created on the TARGET by datum-install.
 # (Passwordless sudo for wheel, if sudo is installed, is left to
 # livecdfs-update's sudoers handling.)

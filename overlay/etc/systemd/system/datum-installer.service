@@ -1,0 +1,28 @@
+[Unit]
+Description=Datum Emergence installer
+# The live ISO is an installer environment: this unit owns tty1 from boot
+# and runs the guided installer. There is no live user, no live desktop and
+# no greeter on the ISO, so nothing else may compete for the visible VT.
+# vconsole-setup first so font/keymap are settled before the TUI paints;
+# the quiet kernel cmdline (livecd/bootargs) keeps boot status off this VT.
+After=systemd-vconsole-setup.service getty@tty1.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=simple
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+ExecStart=/usr/local/bin/datum-install
+# The ISO stays reusable: if the installer exits without installing
+# (menu quit, shell exit, error return), offer the installer again instead
+# of dropping to a dead screen. A successful install ends in reboot.
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

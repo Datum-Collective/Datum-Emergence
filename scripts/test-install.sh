@@ -6,9 +6,13 @@
 #   ./scripts/test-install.sh [--iso PATH] [--disk-size GB] [--wait SECS] [--keep]
 #
 # Requires qemu-system-x86_64 with KVM (or TCG fallback), OVMF firmware for
-# the live boot, and python3 for the serial-console driver. The install runs
-# with init=/bin/sh (no login needed); the installed system is verified
-# through the in-image datum-boot-probe markers on its own serial console.
+# the live boot, and python3 for the serial-console driver. Phase A runs the
+# installer engine non-interactively with init=/bin/sh (no login needed);
+# the installed system is then booted through its own bootloader, logged
+# into through the real tuigreet greeter (typed via the QEMU monitor), and
+# verified through the in-image datum-boot-probe markers on its serial
+# console. The interactive installer TUI itself is covered separately by
+# scripts/test-installer-tui.sh.
 #
 # WARNING: fully automated and DESTRUCTIVE to the scratch disk image it
 # creates (a temp file, removed unless --keep). It never touches host disks:
@@ -48,6 +52,13 @@ for candidate in /usr/share/edk2-ovmf/OVMF_CODE.fd /usr/share/OVMF/OVMF_CODE.fd 
   if test -r "$candidate"; then OVMF_CODE=$candidate; break; fi
 done
 test -n "$OVMF_CODE" || { printf '%s\n' 'test-install: OVMF firmware not found (sys-firmware/edk2-bin).' >&2; exit 1; }
+# Disk-pressure guard: same rationale as test-installer-tui.sh -- the
+# scratch image absorbs several GB of real blocks and the workdir lives on
+# /tmp, so refuse to start when /tmp cannot hold a completed install.
+if test "$(df -k /tmp 2>/dev/null | awk 'NR==2{print $4}')" -lt 6291456; then
+  printf '%s\n' 'test-install: less than 6GiB free on /tmp; clear stale /tmp/emergence-install-test-* workdirs first.' >&2
+  exit 1
+fi
 
 WORKDIR=$(mktemp -d /tmp/emergence-install-test-XXXXXX)
 cleanup() { rm -rf "$WORKDIR"; }
@@ -88,7 +99,11 @@ qemu-system-x86_64 -m 4096 -smp 4 -accel "$accel" -cpu "$cpu" \
   -append "root=live:CDLABEL=DATUM_EMERGENCE_AMD64 rd.live.dir=/ rd.live.squashimg=image.squashfs cdroot console=ttyS0,115200 init=/bin/sh" \
   -display none -serial "telnet:127.0.0.1:$TELNET_PORT,server,nowait" -monitor none &
 QEMU_A=$!
-python3 - "$TELNET_PORT" "$TRANSCRIPT" "$GUEST_DISK" "$GUEST_DISK_BYTES" <<'PYEOF'
+# `|| RC=$?` (not a bare `RC=$?` on the next line): under `set -e` a
+# nonzero driver exit would otherwise terminate the shell before the
+# assignment runs, skipping the keep-branch and cleaning the workdir.
+RC=0
+python3 -u - "$TELNET_PORT" "$TRANSCRIPT" "$GUEST_DISK" "$GUEST_DISK_BYTES" <<'PYEOF' || RC=$?
 import socket, sys, time
 telnet_port, transcript, disk, disk_bytes = int(sys.argv[1]), sys.argv[2], sys.argv[3], int(sys.argv[4])
 tfile = open(transcript, "wb", buffering=0)
@@ -183,31 +198,16 @@ run("mount -t proc none /proc; mount -t sysfs none /sys; "
 if not run("lsblk -bn -o SIZE -d %s" % disk, str(disk_bytes), 60):
     print("FATAL: guest disk size mismatch; refusing to install")
     sys.exit(1)
-# Simulate the live firstboot lifecycle. This phase boots with init=/bin/sh
-# (no systemd), so datum-firstboot-live never runs; create exactly what it
-# would have created: a real local account, a home, and both live-user
-# markers (persistent /etc one + runtime /run one). The installer must then
-# remove that live-only identity from the target it copies.
-if not run("EXTRA=\"\"; "
-           "for g in wheel audio video render input plugdev cdrom; do "
-           "getent group \"$g\" >/dev/null 2>&1 && EXTRA=\"$EXTRA $g\"; done; "
-           "if test -n \"$EXTRA\"; then "
-           "useradd -m -g users -G \"$(printf '%s' \"$EXTRA\" | tr ' ' ',')\" -s /bin/bash livetemp; "
-           "else useradd -m -g users -s /bin/bash livetemp; fi; "
-           "echo livetemp-canary > /home/livetemp/.live-canary; "
-           "mkdir -p /etc/datum /run; "
-           "echo livetemp > /etc/datum/live-user; echo livetemp > /run/datum-live-user; "
-           "getent passwd livetemp && test -f /etc/datum/live-user && echo LIVE_USER_READY",
-           "LIVE_USER_READY", 120):
-    print("FATAL: live-user simulation failed")
-    sys.exit(1)
-ok = run("export EMERGENCE_INSTALL_PASSWORD=emergence-test-pass; "
+# The installer-first ISO never creates a live user: this phase boots with
+# init=/bin/sh (no systemd) and runs the engine directly with flags, exactly
+# like automation would. No live-user simulation is needed or wanted.
+ok = run("export EMERGENCE_INSTALL_PASSWORD=emergencetestpass; "
          "datum-install --disk %s --user datum --hostname emergence-test "
          "--timezone UTC --yes" % disk, "installed Datum Emergence", 1500)
 print("INSTALL %s" % ("SUCCESS" if ok else "FAILED"))
 sys.exit(0 if ok else 1)
 PYEOF
-RC=$?
+printf '%s\n' "test-install: Phase A driver RC=$RC" >&2
 kill "$QEMU_A" 2>/dev/null || true
 wait "$QEMU_A" 2>/dev/null || true
 if test "$RC" -ne 0; then
@@ -219,10 +219,10 @@ if test "$RC" -ne 0; then
 fi
 printf '%s\n' 'test-install: Phase A completed; verifying target on host.' >&2
 # Host-side target verification (read-only loop mount of the installed
-# root): the live-only account and its marker must be gone, the permanent
-# user and its installed autologin must exist, and no live-firstboot files
-# may linger. Partition layout is fixed by the installer: p1 starts at
-# sector 2048 (512M ESP), p2 at sector 1050624 (rest, ext4 root).
+# root): exactly one permanent user, tuigreet default session with no
+# autologin, installed marker present, no live marker, no live-installer
+# files, quiet boot configured. Partition layout is fixed by the installer:
+# p1 starts at sector 2048 (512M ESP), p2 at sector 1050624 (rest, ext4 root).
 TGT="$WORKDIR/tgt"
 mkdir -p "$TGT"
 if ! mount -o loop,ro,offset=$((1050624 * 512)) "$DISK" "$TGT"; then
@@ -241,16 +241,17 @@ tcheck() {
     FAIL=1
   fi
 }
-tcheck "no live marker" test "!" -e "$TGT/etc/datum/live-user"
-tcheck "no live passwd entry" test -z "$(grep '^livetemp:' "$TGT/etc/passwd" || true)"
-tcheck "no live shadow entry" test -z "$(grep '^livetemp:' "$TGT/etc/shadow" || true)"
-tcheck "no live group membership" test -z "$(grep 'livetemp' "$TGT/etc/group" || true)"
-tcheck "no live home" test "!" -e "$TGT/home/livetemp"
+tcheck "installed marker present" test -e "$TGT/etc/datum/installed"
+tcheck "no live marker" test "!" -e "$TGT/etc/datum/live"
+tcheck "no stray UID>=1000 users" test -z "$(awk -F: '$3 >= 1000 && $3 != 65534 && $1 != "datum" {print $1}' "$TGT/etc/passwd" || true)"
 tcheck "permanent user exists" grep -q '^datum:' "$TGT/etc/passwd"
-tcheck "installed autologin present" grep -q 'initial_session' "$TGT/etc/greetd/config.toml"
-tcheck "installed autologin user" grep -q 'user = "datum"' "$TGT/etc/greetd/config.toml"
-tcheck "no live firstboot unit" test "!" -e "$TGT/etc/systemd/system/datum-firstboot-live.service"
-tcheck "no live firstboot script" test "!" -e "$TGT/usr/local/bin/datum-firstboot-live"
+tcheck "user home owned by user (numeric UID: names resolve against the host, not the target)" test "$(stat -c %u "$TGT/home/datum" 2>/dev/null)" = "$(awk -F: '$1=="datum"{print $3}' "$TGT/etc/passwd")"
+tcheck "tuigreet default session" grep -q '^\[default_session\]' "$TGT/etc/greetd/config.toml"
+tcheck "no initial_session autologin" test -z "$(grep '^\[initial_session\]' "$TGT/etc/greetd/config.toml" || true)"
+tcheck "vconsole keymap" grep -qx 'KEYMAP=us' "$TGT/etc/vconsole.conf"
+tcheck "quiet boot configured" grep -q 'systemd.show_status=no' "$TGT/etc/default/grub"
+tcheck "no live installer unit" test "!" -e "$TGT/etc/systemd/system/datum-installer.service"
+tcheck "no live installer binary" test "!" -e "$TGT/usr/local/bin/datum-install"
 tcheck "no legacy cleanup unit" test "!" -e "$TGT/etc/systemd/system/datum-firstboot.service"
 umount "$TGT" || FAIL=1
 if test "$FAIL" -ne 0; then
@@ -260,26 +261,107 @@ if test "$FAIL" -ne 0; then
 fi
 printf '%s\n' 'test-install: installation completed; booting installed disk.' >&2
 
-# Phase B: boot the installed disk through its own bootloader, verify probe.
+# Phase B: boot the installed disk through its own bootloader, log in
+# through the real tuigreet greeter (installed tuigreet login typed via the
+# QEMU monitor, like a human would; there is no autologin), and verify the
+# desktop session via the in-image probe.
 VARS_B="$WORKDIR/ovmf-vars-b.fd"
 cp -f "$(dirname "$OVMF_CODE")/OVMF_VARS.fd" "$VARS_B" 2>/dev/null || dd if=/dev/zero of="$VARS_B" bs=1M count=4 2>/dev/null
 SERIAL_B="$WORKDIR/installed-serial.log"
+MON_B="$WORKDIR/installed-mon.sock"
 : > "$SERIAL_B"
+rm -f "$MON_B"
 qemu-system-x86_64 -m 4096 -smp 4 -accel "$accel" -cpu "$cpu" \
   -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
   -drive "if=pflash,format=raw,file=$VARS_B" \
   -drive "file=$DISK,format=raw,if=virtio" \
-  -boot order=c -display none -serial "file:$SERIAL_B" -monitor none &
+  -boot order=c -display none -serial "file:$SERIAL_B" -monitor "unix:$MON_B,server,nowait" &
 QEMU_B=$!
-sleep "$WAIT"
+# Same errexit-safe status capture as Phase A.
+RC_B=0
+python3 -u - "$MON_B" "$SERIAL_B" "$WAIT" <<'PYEOF' || RC_B=$?
+import socket, sys, time
+mon_sock, serial_log, wait = sys.argv[1], sys.argv[2], int(sys.argv[3])
+user, pw = "datum", "emergencetestpass"
+m = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+m.settimeout(15)
+for _ in range(60):
+    try:
+        m.connect(mon_sock)
+        break
+    except (FileNotFoundError, ConnectionRefusedError):
+        time.sleep(2)
+else:
+    print("FATAL: no monitor")
+    sys.exit(1)
+m.settimeout(10)
+try:
+    m.recv(4096)
+except socket.timeout:
+    pass
+def pump():
+    m.settimeout(0)
+    try:
+        while True:
+            chunk = m.recv(65536)
+            if not chunk:
+                break
+    except (socket.timeout, BlockingIOError, OSError):
+        pass
+    finally:
+        m.settimeout(10)
+def sendkey(keys):
+    try:
+        m.sendall(("sendkey %s\r" % keys).encode())
+    except (BrokenPipeError, OSError) as e:
+        print("FATAL: monitor send failed: %s" % e)
+        sys.exit(1)
+    pump()
+def stype(text, delay=0.4):
+    for ch in text:
+        sendkey("spc" if ch == ' ' else ch)
+        time.sleep(delay)
+    sendkey("ret")
+    time.sleep(1.0)
+def wait_serial(marker, timeout):
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            with open(serial_log, errors="replace") as f:
+                if marker in f.read():
+                    return True
+        except OSError:
+            pass
+        time.sleep(5)
+    return False
+# The installed kernel has no serial console, but the probe writes its
+# markers to /dev/ttyS0 explicitly: greetd active means the greeter is up.
+if not wait_serial("service.greetd.service=active", wait):
+    print("FATAL: installed greetd never became active")
+    sys.exit(1)
+time.sleep(30)
+stype(user)
+time.sleep(3)
+stype(pw)
+if not wait_serial("DATUM_PROBE end", wait):
+    print("FATAL: installed boot probe never finished")
+    sys.exit(1)
+print("INSTALLED LOGIN DONE")
+PYEOF
+printf '%s\n' "test-install: Phase B driver RC=$RC_B" >&2
 kill "$QEMU_B" 2>/dev/null || true
 wait "$QEMU_B" 2>/dev/null || true
+if test "$RC_B" -ne 0; then
+  printf '%s\n' "test-install: FAIL: installed-system login driver failed." >&2
+  trap - EXIT INT TERM
+  exit 1
+fi
 
 FAIL=0
 for want in 'live-media=absent(installed?)' 'user.session=yes(datum)' \
     'user.session.hyprland=yes' 'installer.fstab-root=uuid-ok' \
     'installer.fstab-efi=uuid-ok' 'installer.removable-bootloader=present' \
-    'installer.live-user-removed=yes'; do
+    'installer.installed-marker=present' 'installer.live-marker-removed=yes'; do
   key=${want%%=*}; val=${want#*=}
   if ! grep -q "DATUM_PROBE $key=$val" "$SERIAL_B"; then
     printf '%s\n' "test-install: MISSING/UNHEALTHY: $want" >&2

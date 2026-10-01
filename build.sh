@@ -125,17 +125,18 @@ stage_artifact() {
 # during startup, but autoresume skips the bootloader step that puts the
 # kernel, initramfs and grub.cfg there. Resuming a stage2 run that already
 # passed bootloader therefore produces a kernel-less ISO without any error.
-# If such state exists, wipe the stage2 work area first so the run below is
-# a fresh, complete stage2 in a single invocation.
+# Worse, a resume can also re-run kmerge against a chroot whose /boot no
+# longer holds images (emerge --update is a no-op when the kernel package
+# is already installed, so nothing reinstalls them) while kmerge's tar
+# failures are non-fatal there. Either way the result is an unbootable ISO
+# that older prefix-match checks (gentoo.igz satisfies "gentoo") could not
+# catch. Stage2 therefore ALWAYS runs fresh: correctness over minutes.
 guard_stage2_resume() {
   need_root
-  resume_dir="$work/catalyst/tmp/datum/.autoresume-livecd-stage2-amd64-$version_stamp"
-  if test -f "$resume_dir/bootloader"; then
-    printf '%s\n' "build: stale stage2 state detected (previous run passed bootloader); restarting stage2 fresh" >&2
-    rm -rf "$work/catalyst/tmp/datum/livecd-stage2-amd64-$version_stamp" \
-           "$work/catalyst/tmp/datum/livecd-stage2-amd64-$version_stamp.lock" \
-           "$resume_dir"
-  fi
+  printf '%s\n' "build: starting stage2 fresh (resume disabled: kernel-less ISO hazard)" >&2
+  rm -rf "$work/catalyst/tmp/datum/livecd-stage2-amd64-$version_stamp" \
+         "$work/catalyst/tmp/datum/livecd-stage2-amd64-$version_stamp.lock" \
+         "$work/catalyst/tmp/datum/.autoresume-livecd-stage2-amd64-$version_stamp"
 }
 
 run_stage() { catalyst -c "$work/generated/catalyst.conf" -f "$work/generated/stage1.spec"; }
@@ -156,11 +157,29 @@ validate_iso() {
   file "$dist/emergence-amd64.iso" | grep -qi 'ISO 9660' || die "output is not an ISO 9660 image"
   if command -v xorriso >/dev/null 2>&1; then
     xorriso -indev "$dist/emergence-amd64.iso" -toc
-    # A kernel-less ISO is the known failure mode of a resumed stage2
-    # (staging dir wiped, bootloader step skipped). Refuse it loudly.
     iso_files=$(xorriso -indev "$dist/emergence-amd64.iso" -find / 2>/dev/null)
-    printf '%s\n' "$iso_files" | grep -q '/boot/grub/grub.cfg' || die "ISO has no /boot/grub/grub.cfg (stale stage2 resume?)"
-    printf '%s\n' "$iso_files" | grep -Eq '/boot/(gentoo|vmlinuz[^ ]*|kernel[^ ]*)' || die "ISO has no kernel in /boot (stale stage2 resume?)"
+    printf '%s\n' "$iso_files" | grep -q '/boot/grub/grub.cfg' || die "ISO has no /boot/grub/grub.cfg"
+    # Airtight kernel/initramfs check: every `linux`/`initrd` path the ISO's
+    # own grub.cfg references must exist in the ISO. A bare prefix match is
+    # NOT enough (the initramfs gentoo.igz satisfies a naive "gentoo"
+    # pattern while the kernel image itself is missing).
+    tmp_grub=$(mktemp /tmp/emergence-grub-check-XXXXXX.cfg)
+    xorriso -indev "$dist/emergence-amd64.iso" -osirrox on \
+      -extract /boot/grub/grub.cfg "$tmp_grub" >/dev/null 2>&1 \
+      || die "cannot extract grub.cfg from ISO"
+    missing=0
+    for img in $(grep -E '^[[:space:]]*(linux|initrd)[[:space:]]' "$tmp_grub" | awk '{print $2}'); do
+      case "$img" in
+        /*) ;;
+        *) die "grub.cfg references non-absolute path: $img" ;;
+      esac
+      if ! printf '%s\n' "$iso_files" | grep -qx "'$img'"; then
+        printf '%s\n' "build: ISO is missing grub-referenced file: $img" >&2
+        missing=1
+      fi
+    done
+    rm -f "$tmp_grub"
+    test "$missing" -eq 0 || die "ISO is missing kernel/initramfs files referenced by grub.cfg (unbootable)"
   fi
 }
 
@@ -174,12 +193,12 @@ build_info() {
 }
 
 test_iso() { "$root/scripts/test-iso.sh" "$dist/emergence-amd64.iso"; }
-# The live ISO has no usable account until the firstboot setup creates one,
-# so a bare boot can never reach a desktop: CI drives the real lifecycle
-# (firstboot typing, tuigreet login, desktop) through the actual GRUB boot
-# path. Test credentials live only in this invocation, never in the image.
-test_ci() { "$root/scripts/test-iso.sh" --firstboot "citest:citest123" --wait "${EMERGENCE_BOOT_WAIT:-900}" "$dist/emergence-amd64.iso"; }
-test_firstboot() { "$root/scripts/test-firstboot-checks.sh" --scenario "${1:-all}" "$dist/emergence-amd64.iso"; }
+# The live ISO is an installer environment (no live login): CI boots it
+# headless and asserts the installer service is up, the live marker is
+# present, and no session exists. Test credentials live only in the test
+# invocations below, never in the image.
+test_ci() { "$root/scripts/test-iso.sh" --ci /tmp/emergence-boot-ci-serial.log --wait "${EMERGENCE_BOOT_WAIT:-900}" "$dist/emergence-amd64.iso"; }
+test_installer_tui() { "$root/scripts/test-installer-tui.sh" --iso "$dist/emergence-amd64.iso"; }
 test_install() { "$root/scripts/test-install.sh" --iso "$dist/emergence-amd64.iso"; }
 
 clean() {
@@ -194,9 +213,9 @@ case ${1:-help} in
   iso) iso ;;
   test) test_iso ;;
   test-ci) test_ci ;;
-  test-firstboot) test_firstboot "${2:-all}" ;;
+  test-installer-tui) test_installer_tui ;;
   test-install) test_install ;;
   all) configure; prepare_catalyst; run_stage; mkdir -p "$dist"; guard_stage2_resume; catalyst -c "$work/generated/catalyst.conf" -f "$work/generated/stage2.spec"; validate_iso; build_info ;;
   clean) clean "${2:-}" ;;
-  *) printf '%s\n' 'usage: ./build.sh {audit|configure|stage|iso|test|test-ci|test-firstboot [scenario]|test-install|all|clean --yes}' >&2; exit 2 ;;
+  *) printf '%s\n' 'usage: ./build.sh {audit|configure|stage|iso|test|test-ci|test-installer-tui|test-install|all|clean --yes}' >&2; exit 2 ;;
 esac
