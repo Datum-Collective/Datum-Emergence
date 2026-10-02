@@ -8,7 +8,7 @@ source_subpath: datum/livecd-stage1-amd64-@VERSION_STAMP@
 portage_confdir: @PROJECT_ROOT@/config
 repos: @OVERLAY_REPOS@
 livecd/fstype: squashfs
-livecd/fsops: --compressor xz -b 1M -X x86
+livecd/fsops: --compressor xz -b 1M -Xbcj x86
 livecd/iso: @ISO_PATH@
 livecd/root_overlay: @ROOT_OVERLAY@
 livecd/fsscript: @PROJECT_ROOT@/catalyst/livecd-fsscript.sh
