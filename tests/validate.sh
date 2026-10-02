@@ -30,7 +30,11 @@ grep -q '^boot/kernel/gentoo/sources: sys-kernel/gentoo-kernel$' "$root/catalyst
 grep -q '^boot/kernel/gentoo/distkernel: yes$' "$root/catalyst/specs/emergence-amd64.spec"
 grep -q '^livecd/rm: /usr/src$' "$root/catalyst/specs/emergence-amd64.spec"
 grep -q '^livecd/fstype: squashfs$' "$root/catalyst/specs/emergence-amd64.spec"
-grep -q 'compressor xz -b 1M -Xbcj x86' "$root/catalyst/specs/emergence-amd64.spec"
+grep -q 'compressor xz -b 1M -X x86' "$root/catalyst/specs/emergence-amd64.spec"
+# Catalyst shells out to gensquashfs (squashfs-tools-ng), where the xz BCJ
+# filter is the bare `-X x86` compressor option. Classic-mksquashfs
+# `-Xbcj x86` aborts the stage2 image build ("Unknown extra arguments").
+no_match 'Xbcj' "$root/catalyst/specs/emergence-amd64.spec"
 grep -q 'guard_stage2_resume' "$root/build.sh"
 grep -q 'boot/grub/grub.cfg' "$root/build.sh"
 # The ISO validator must resolve every grub-referenced kernel/initramfs path
