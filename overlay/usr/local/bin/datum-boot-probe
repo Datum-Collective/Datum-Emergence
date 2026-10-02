@@ -130,13 +130,16 @@ if test -n "$SESSION_USER"; then
   done
 fi
 # Ask the compositor about outputs (this also proves hyprctl can talk to it).
+# Runs as root with the session's runtime dir + instance signature: root
+# bypasses the socket permissions, so no per-user sudo rule is needed
+# (none ships on the image; passwordless sudo to the user never worked).
 if test -n "$SESSION_USER"; then
   SUID=$(id -u "$SESSION_USER" 2>/dev/null || echo "")
   if test -n "$SUID"; then
     for HDIR in /run/user/"$SUID"/hypr/*; do
       test -d "$HDIR" || continue
       SIG=$(basename "$HDIR")
-      MONS=$(sudo -n -u "$SESSION_USER" env "HYPRLAND_INSTANCE_SIGNATURE=$SIG" "XDG_RUNTIME_DIR=/run/user/$SUID" hyprctl monitors 2>&1 | grep -E '^Monitor' | tr '\n' ';' | cut -c1-200)
+      MONS=$(env "HYPRLAND_INSTANCE_SIGNATURE=$SIG" "XDG_RUNTIME_DIR=/run/user/$SUID" hyprctl monitors 2>&1 | grep -E '^Monitor' | tr '\n' ';' | cut -c1-200)
       emit "hyprland.monitors=$MONS"
     done
   fi

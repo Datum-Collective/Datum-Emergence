@@ -112,6 +112,21 @@ grep -q 'start-hyprland' "$root/overlay/usr/local/bin/start-datum"
 grep -q 'XDG_SESSION_TYPE:=wayland' "$root/overlay/usr/local/bin/start-datum"
 grep -q 'XDG_CURRENT_DESKTOP:=Hyprland' "$root/overlay/usr/local/bin/start-datum"
 grep -q 'XDG_RUNTIME_DIR is unset' "$root/overlay/usr/local/bin/start-datum"
+# Compositor stdin/session hardening (established by experiment): Hyprland
+# deadlocks when it inherits a live login tty as stdin, and aborts with no
+# VT at all -- so the launcher detaches stdin and refuses VT-less sessions
+# with a diagnostic instead of a coredump.
+grep -q '< /dev/null' "$root/overlay/usr/local/bin/start-datum"
+grep -q 'no virtual terminal in this session' "$root/overlay/usr/local/bin/start-datum"
+# This Hyprland build's hyprctl takes Lua chunks: a bare `dispatch exit`
+# interpolates to hl.dispatch(exit) and fails; the power menu must use the
+# verified hl.dsp.exit() form.
+grep -q 'hl.dsp.exit()' "$root/etc/skel/.config/wofi/power.sh"
+no_match 'hyprctl dispatch exit$' "$root/etc/skel/.config/wofi/power.sh"
+# The boot probe talks to the compositor as root-with-env (no sudo rule
+# ships on the image; `sudo -n -u` always failed silently).
+no_match 'sudo -n -u' "$root/overlay/usr/local/bin/datum-boot-probe"
+grep -q 'HYPRLAND_INSTANCE_SIGNATURE=$SIG' "$root/overlay/usr/local/bin/datum-boot-probe"
 # Quiet deterministic boot: kernel cmdline silences status, the installer
 # owns the live VT, the probe never blocks the login path.
 grep -q 'livecd/bootargs' "$root/catalyst/specs/emergence-amd64.spec"

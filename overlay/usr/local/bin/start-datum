@@ -37,11 +37,29 @@ fi
 # greppable even when the compositor produces no output before exiting.
 logger -t start-datum -- "launching Hyprland for $(id -un 2>/dev/null || echo '?') runtime=${XDG_RUNTIME_DIR} session=${XDG_SESSION_TYPE}" 2>/dev/null || true
 
+# The compositor must never inherit a live terminal as stdin: launched
+# from an interactive shell on the target VT with the tty as stdin,
+# Hyprland deadlocks during backend setup (same session is fine; it is
+# specifically the shared stdin that wedges it -- established by
+# experiment). Detach stdin in both branches so a manual TTY launch
+# behaves exactly like the greetd launch.
+# Refusing instead of dumping core when there is no VT at all (serial/SSH
+# session): Hyprland 0.56 aborts in CBackend::create() with no usable DRM
+# setup and leaves a coredump; a one-line diagnostic names the actual
+# problem. Greetd and VT-getty sessions always carry a VTNr.
+if command -v loginctl >/dev/null 2>&1 && test -n "${XDG_SESSION_ID:-}"; then
+  _vtnr=$(loginctl show-session "$XDG_SESSION_ID" -p VTNr 2>/dev/null | sed -n 's/^VTNr=//p')
+  if test -z "$_vtnr" || test "$_vtnr" = 0; then
+    printf 'start-datum: no virtual terminal in this session (serial/SSH?); Hyprland needs an active VT -- log in on the console instead\n' >&2
+    exit 1
+  fi
+fi
+
 config_home=${XDG_CONFIG_HOME:-"$HOME/.config"}
 config="$config_home/hypr/hyprland.lua"
 
 if command -v start-hyprland >/dev/null 2>&1; then
-  exec start-hyprland -- --config "$config"
+  exec start-hyprland -- --config "$config" < /dev/null
 else
-  exec Hyprland --config "$config"
+  exec Hyprland --config "$config" < /dev/null
 fi

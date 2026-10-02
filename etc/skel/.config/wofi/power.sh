@@ -15,6 +15,9 @@ case "$choice" in
         systemctl reboot
         ;;
     "⇦ Logout")
-        hyprctl dispatch exit
+        # This Hyprland build's `hyprctl dispatch` takes a Lua chunk: a bare
+        # `dispatch exit` is interpolated as hl.dispatch(exit) and fails
+        # ("expected a dispatcher"). Verified working form below.
+        hyprctl dispatch "hl.dsp.exit()"
         ;;
 esac

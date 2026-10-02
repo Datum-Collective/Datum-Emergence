@@ -141,6 +141,16 @@ Consequences for the product:
 - The installed desktop requires real DRM (physical hardware or a VM
   GPU that binds: bochs/virtio-gpu proven; vmware-SVGA-on-QEMU and
   untested VMSVGA are out of scope for automated acceptance).
+- Launch conditions (established 2026-10-02 on the installed system):
+  the compositor needs a VT-bound logind session (greetd/VT-getty both
+  fine); with no VT it aborts in CBackend::create, and with a live login
+  tty inherited as stdin it deadlocks instead of starting. `start-datum`
+  therefore detaches stdin on both exec branches and refuses VT-less
+  sessions with a diagnostic rather than a coredump. Manual TTY launch
+  goes through `start-datum`, never bare `Hyprland`.
+- This build's `hyprctl dispatch` takes Lua chunks
+  (`hl.dsp.exec_cmd(...)`, `hl.dsp.exit()`); bare words fail. The wofi
+  power menu uses the verified form.
 - datum-diagnose ships on live and installed systems so any future
   compositor failure can be captured the same way (session, env,
   runtime dir, lspci, /dev/dri, binaries, pgrep, sockets, coredumps,
